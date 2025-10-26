@@ -1,0 +1,88 @@
+@startuml
+skinparam componentStyle rectangle
+
+title Smart Farm Recommendation System Design
+
+database "Crop_recommendationV2.csv" as CSV
+
+package "Smart Farm System" {
+
+  rectangle "Data Ingestion" as DataIngestion {
+    CSV --> (Load Data)
+  }
+
+  rectangle "Data Preparation & Feature Engineering" <<Data Munging, Cleaning, Transformation>> {
+    (Load Data) --> [Initial Data Exploration]
+    [Initial Data Exploration] --> [Handle Missing Values]
+    [Handle Missing Values] --> [Handle Duplicates]
+    [Handle Duplicates] --> [Data Type Conversion]
+    [Data Type Conversion] --> [Feature Engineering (NPK_Ratio, Temp_Band)]
+    [Feature Engineering (NPK_Ratio, Temp_Band)] --> [Handle Outliers]
+    [Handle Outliers] --> [Encode Label]
+    [Encode Label] --> [Calculate Derived Features (THI, NBR, WAI, PP, SFI)]
+    [Calculate Derived Features (THI, NBR, WAI, PP, SFI)] --> [Feature Scaling]
+    [Feature Scaling] --> [PCA]
+  }
+
+  rectangle "Machine Learning Models" as MLModels {
+    PCA --> [Deep Learning Model Training (Ensemble)]
+    [Deep Learning Model Training (Ensemble)] --> [Predictive Analysis]
+  }
+
+  rectangle "Recommendation Engine" as RecommendationEngine {
+    [Predictive Analysis] --> [Inverse Recommendation (Sensor Changes)]
+  }
+
+  rectangle "Visualization & Reporting" as Visualization {
+    PCA --> [Data Visualization (Pair Plot, Heatmap)]
+    PCA --> [PCA Analysis (Explained Variance)]
+  }
+
+  note "Components involving data munging, cleaning, and transformation are highlighted with a dotted border." as N1
+
+  ' Highlighted components for data munging, cleaning, and transformation
+  rectangle "Data Preparation Notebook (data_preparation.ipynb)" <<Data Munging, Cleaning, Transformation>> {
+    [Initial Data Exploration]
+    [Handle Missing Values]
+    [Handle Duplicates]
+    [Data Type Conversion]
+    [Feature Engineering (NPK_Ratio, Temp_Band)]
+  }
+
+  rectangle "Recommendation Script (smart_farm_recommendation.py)" <<Data Munging, Cleaning, Transformation>> {
+    [Load Data]
+    [Handle Outliers]
+    [Encode Label]
+    [Calculate Derived Features (THI, NBR, WAI, PP, SFI)]
+    [Feature Scaling]
+    [PCA]
+  }
+
+  rectangle "Visualization Script (smart_farm_visualization.py)" <<Data Munging, Cleaning, Transformation>> {
+    [Feature Scaling]
+    [PCA]
+  }
+
+  ' Relationships between the highlighted components and the main flow
+  CSV --> [Load Data]
+  [Load Data] --> [Initial Data Exploration]
+  [Initial Data Exploration] --> [Handle Missing Values]
+  [Handle Missing Values] --> [Handle Duplicates]
+  [Handle Duplicates] --> [Data Type Conversion]
+  [Data Type Conversion] --> [Feature Engineering (NPK_Ratio, Temp_Band)]
+
+  [Feature Engineering (NPK_Ratio, Temp_Band)] --> [Handle Outliers]
+  [Handle Outliers] --> [Encode Label]
+  [Encode Label] --> [Calculate Derived Features (THI, NBR, WAI, PP, SFI)]
+  [Calculate Derived Features (THI, NBR, WAI, PP, SFI)] --> [Feature Scaling]
+  [Feature Scaling] --> [PCA]
+
+  PCA --> [Deep Learning Model Training (Ensemble)]
+  [Deep Learning Model Training (Ensemble)] --> [Predictive Analysis]
+  [Predictive Analysis] --> [Inverse Recommendation (Sensor Changes)]
+
+  PCA --> [Data Visualization (Pair Plot, Heatmap)]
+  PCA --> [PCA Analysis (Explained Variance)]
+}
+
+@enduml
