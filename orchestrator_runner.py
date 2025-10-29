@@ -60,7 +60,9 @@ def main():
                     print(f"\n[{plot_id}] Available Commands for Orchestrator {plot_id}:")
                     print(f"  set [sensor_name] [value] - Manually set a sensor value (e.g., 'set N 120')")
                     print(f"  crop_param [param_name] [value] - Update a crop parameter (e.g., 'crop_param target_yield 150')")
-                    print(f"  status                  - Show current sensor data and crop parameters for this plot")
+                    print(f"  irrigate [amount_ml]    - Manually irrigate the plot (e.g., 'irrigate 500')")
+                    print(f"  fertilize [type] [amount_mg] - Manually add fertilizer (e.g., 'fertilize NPK 100')")
+                    print(f"  status                  - Show current sensor data, crop parameters, and recent history")
                     print(f"  exit                    - Stop this orchestrator")
                     print(f"  help                    - Show this help message")
                 elif action == 'set':
@@ -90,6 +92,31 @@ def main():
                             print(f"[{plot_id}] Failed to update crop parameter '{param_name}'.")
                     except ValueError:
                         print(f"[{plot_id}] Invalid value. Please enter a number.")
+                elif action == 'irrigate':
+                    if len(command_input) < 2:
+                        print(f"[{plot_id}] Usage: irrigate [amount_ml]")
+                        continue
+                    try:
+                        amount_ml = float(command_input[1])
+                        if 'water_pump' in orchestrator.control_devices:
+                            orchestrator.control_devices['water_pump'].perform_action(plot_id, amount_ml)
+                        else:
+                            print(f"[{plot_id}] Water pump control device not available for this plot.")
+                    except ValueError:
+                        print(f"[{plot_id}] Invalid amount. Please enter a number.")
+                elif action == 'fertilize':
+                    if len(command_input) < 3:
+                        print(f"[{plot_id}] Usage: fertilize [type] [amount_mg]")
+                        continue
+                    nutrient_type = command_input[1]
+                    try:
+                        amount_mg = float(command_input[2])
+                        if 'nutrient_dispenser' in orchestrator.control_devices:
+                            orchestrator.control_devices['nutrient_dispenser'].perform_action(plot_id, nutrient_type, amount_mg)
+                        else:
+                            print(f"[{plot_id}] Nutrient dispenser control device not available for this plot.")
+                    except ValueError:
+                        print(f"[{plot_id}] Invalid amount. Please enter a number.")
                 elif action == 'status':
                     info = farm_instance.get_plot_info(plot_id)
                     if info:
@@ -103,8 +130,24 @@ def main():
                         print("  Control Device Statuses:")
                         for dev_name, dev_status in info['control_device_statuses'].items():
                             print(f"    {dev_name}: {dev_status}")
-                        print(f"  Sensor Data History Count: {len(orchestrator.data_history)}")
-                        print(f"  Recommendation History Count: {len(orchestrator.recommendation_history)}")
+                        
+                        # Display recent sensor data history
+                        print("\n  Recent Sensor Data History (last 5):")
+                        if orchestrator.data_history:
+                            for i, (timestamp, data) in enumerate(list(orchestrator.data_history)[-5:]):
+                                print(f"    {i+1}. {time.strftime('%H:%M:%S', time.localtime(timestamp))}: {data}")
+                        else:
+                            print("    No sensor data history available.")
+
+                        # Display recent recommendation history
+                        print("\n  Recent Recommendation History (last 3):")
+                        if orchestrator.recommendation_history:
+                            for i, (timestamp, recs) in enumerate(list(orchestrator.recommendation_history)[-3:]):
+                                print(f"    {i+1}. {time.strftime('%H:%M:%S', time.localtime(timestamp))}:")
+                                for rec in recs:
+                                    print(f"      - {rec}")
+                        else:
+                            print("    No recommendation history available.")
                     else:
                         print(f"[{plot_id}] Plot {plot_id} not found in this orchestrator's context.")
                 else:

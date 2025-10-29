@@ -87,11 +87,11 @@ class ControlDevice:
         self.status = "idle"
         self.lock = Lock()
 
-    def perform_action(self, *args, **kwargs):
+    def perform_action(self, orchestrator_instance, *args, **kwargs):
         with self.lock:
             self.status = "active"
             print(f"[{self.name}] Performing action...")
-            result = self.action_func(*args, **kwargs)
+            result = self.action_func(orchestrator_instance, *args, **kwargs)
             self.status = "idle"
             return result
 
@@ -100,24 +100,57 @@ class ControlDevice:
             return self.status
 
 # Define specific actions
-def water_crop_action(plot_id, amount_ml):
+def water_crop_action(orchestrator_instance, amount_ml):
+    plot_id = orchestrator_instance.plot_id
     print(f"[ACTION] Plot {plot_id}: Watering crop with {amount_ml} ml of water.")
-    # In a real system, this would interface with an irrigation system
+    # Simulate increase in soil moisture
+    soil_moisture_sensor = orchestrator_instance.sensor_group.get_sensor('soil_moisture')
+    if soil_moisture_sensor:
+        current_moisture = soil_moisture_sensor.get_value()
+        new_moisture = min(soil_moisture_sensor.max_val, current_moisture + (amount_ml / 100.0)) # Example: 100ml increases moisture by 1%
+        soil_moisture_sensor.set_value(new_moisture)
+        print(f"[{plot_id}] Soil moisture increased to {new_moisture:.2f}%.")
     return f"Watered {plot_id} with {amount_ml} ml"
 
-def notify_user_action(plot_id, message):
+def notify_user_action(orchestrator_instance, message):
+    plot_id = orchestrator_instance.plot_id
     print(f"[ACTION] Plot {plot_id}: User Notification: {message}")
-    # In a real system, this would send an email, SMS, or app notification
     return f"Notified user for {plot_id}: {message}"
 
-def adjust_lighting_action(plot_id, intensity_percent):
+def adjust_lighting_action(orchestrator_instance, intensity_percent):
+    plot_id = orchestrator_instance.plot_id
     print(f"[ACTION] Plot {plot_id}: Adjusting lighting to {intensity_percent}%.")
-    # In a real system, this would control grow lights
+    # Simulate change in sunlight exposure
+    sunlight_sensor = orchestrator_instance.sensor_group.get_sensor('sunlight_exposure')
+    if sunlight_sensor:
+        # Example: Map intensity_percent (0-100) to sunlight_exposure (min-max)
+        new_sunlight = sunlight_sensor.min_val + (sunlight_sensor.max_val - sunlight_sensor.min_val) * (intensity_percent / 100.0)
+        sunlight_sensor.set_value(new_sunlight)
+        print(f"[{plot_id}] Sunlight exposure adjusted to {new_sunlight:.2f} lux.")
     return f"Adjusted lighting for {plot_id} to {intensity_percent}%"
 
-def adjust_nutrient_action(plot_id, nutrient_type, amount_mg):
+def adjust_nutrient_action(orchestrator_instance, nutrient_type, amount_mg):
+    plot_id = orchestrator_instance.plot_id
     print(f"[ACTION] Plot {plot_id}: Adjusting {nutrient_type} by {amount_mg} mg.")
-    # In a real system, this would control nutrient delivery systems
+    # Simulate increase in N, P, K based on nutrient_type
+    if nutrient_type.upper() == 'NPK':
+        n_sensor = orchestrator_instance.sensor_group.get_sensor('N')
+        p_sensor = orchestrator_instance.sensor_group.get_sensor('P')
+        k_sensor = orchestrator_instance.sensor_group.get_sensor('K')
+        
+        if n_sensor:
+            n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + (amount_mg / 10.0))) # Example
+        if p_sensor:
+            p_sensor.set_value(min(p_sensor.max_val, p_sensor.get_value() + (amount_mg / 10.0)))
+        if k_sensor:
+            k_sensor.set_value(min(k_sensor.max_val, k_sensor.get_value() + (amount_mg / 10.0)))
+        print(f"[{plot_id}] NPK levels adjusted.")
+    elif nutrient_type.upper() == 'N':
+        n_sensor = orchestrator_instance.sensor_group.get_sensor('N')
+        if n_sensor:
+            n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + (amount_mg / 5.0)))
+        print(f"[{plot_id}] Nitrogen level adjusted.")
+    # Add more specific nutrient types if needed
     return f"Adjusted {nutrient_type} for {plot_id} by {amount_mg} mg"
 
 # --- 3. Crop Management Module ---
@@ -203,25 +236,25 @@ class Orchestrator:
     def _trigger_action_from_recommendation(self, recommendation_text):
         # Simple rule-based action triggering for demonstration
         if "increase conditions affecting WAI" in recommendation_text:
-            self.control_devices['water_pump'].perform_action(self.plot_id, 500) # Water 500ml
+            self.control_devices['water_pump'].perform_action(self, 500) # Water 500ml
         elif "decrease conditions affecting WAI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self.plot_id, "Soil moisture is too high, consider reducing irrigation.")
+            self.control_devices['notify_user'].perform_action(self, "Soil moisture is too high, consider reducing irrigation.")
         elif "increase conditions affecting NBR" in recommendation_text:
-            self.control_devices['nutrient_dispenser'].perform_action(self.plot_id, 'NPK', 100)
+            self.control_devices['nutrient_dispenser'].perform_action(self, 'NPK', 100)
         elif "decrease conditions affecting NBR" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self.plot_id, "Nutrient levels are too high, consider flushing or reducing fertilizer.")
+            self.control_devices['notify_user'].perform_action(self, "Nutrient levels are too high, consider flushing or reducing fertilizer.")
         elif "increase conditions affecting PP" in recommendation_text:
-            self.control_devices['lighting_system'].perform_action(self.plot_id, 80) # Increase light to 80%
+            self.control_devices['lighting_system'].perform_action(self, 80) # Increase light to 80%
         elif "decrease conditions affecting PP" in recommendation_text:
-            self.control_devices['lighting_system'].perform_action(self.plot_id, 40) # Decrease light to 40%
+            self.control_devices['lighting_system'].perform_action(self, 40) # Decrease light to 40%
         elif "increase conditions affecting THI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self.plot_id, "Temperature/Humidity Index is low, consider increasing temperature or humidity.")
+            self.control_devices['notify_user'].perform_action(self, "Temperature/Humidity Index is low, consider increasing temperature or humidity.")
         elif "decrease conditions affecting THI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self.plot_id, "Temperature/Humidity Index is high, consider decreasing temperature or humidity.")
+            self.control_devices['notify_user'].perform_action(self, "Temperature/Humidity Index is high, consider decreasing temperature or humidity.")
         elif "increase conditions affecting SFI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self.plot_id, "Soil Fertility Index is low, consider adding organic matter or compost.")
+            self.control_devices['notify_user'].perform_action(self, "Soil Fertility Index is low, consider adding organic matter or compost.")
         elif "decrease conditions affecting SFI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self.plot_id, "Soil Fertility Index is high, consider soil aeration or dilution.")
+            self.control_devices['notify_user'].perform_action(self, "Soil Fertility Index is high, consider soil aeration or dilution.")
 
 
     def start(self):

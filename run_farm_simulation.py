@@ -5,6 +5,7 @@ import sys
 import os
 import subprocess
 import platform
+from multiprocessing import Lock
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')

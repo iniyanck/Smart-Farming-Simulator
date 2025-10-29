@@ -252,24 +252,28 @@ for i, gb_model in enumerate(gb_ensemble_models):
 print("Models and preprocessing objects saved successfully.")
 
 ## 7. Calculate Crop-Specific Ideal Indicator Ranges
-# Calculate the 25th and 75th percentiles for each indicator, grouped by crop label.
+# Calculate the mean and standard deviation for each indicator, grouped by crop label,
+# and define the ideal range as mean +/- 1 standard deviation.
 crop_ideal_indicator_ranges = {}
 for crop_label in df_cleaned['label'].unique():
     crop_data = df_cleaned[df_cleaned['label'] == crop_label]
     ranges = {}
     for indicator in target_indicators:
-        q1 = crop_data[indicator].quantile(0.25)
-        q3 = crop_data[indicator].quantile(0.75)
-        ranges[indicator] = (q1, q3)
+        mean_val = crop_data[indicator].mean()
+        std_val = crop_data[indicator].std()
+        # Define range as mean +/- 1 standard deviation
+        min_val = mean_val - std_val
+        max_val = mean_val + std_val
+        ranges[indicator] = (min_val, max_val)
     crop_ideal_indicator_ranges[crop_label] = ranges
 
-print("\nCalculated Crop-Specific Ideal Indicator Ranges (25th-75th percentile):")
+print("\nCalculated Crop-Specific Ideal Indicator Ranges (Mean +/- 1 Std Dev):")
 for crop, ranges in crop_ideal_indicator_ranges.items():
     print(f"  {crop}:")
     for indicator, (min_val, max_val) in ranges.items():
         print(f"    {indicator}: ({min_val:.2f}, {max_val:.2f})")
 
-## 7. Predictive Analysis and Inverse Recommendation System
+## 8. Predictive Analysis and Inverse Recommendation System
 
 # The goal is to predict multiple indicators and then, given ideal indicator values,
 # suggest changes to sensor values.
