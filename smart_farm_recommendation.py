@@ -1,166 +1,150 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.models import Sequential, Model, load_model
 from tensorflow.keras.layers import Dense, Dropout, Input
-from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.optimizers import Adam
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor # Added for diverse ensemble
-from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 import warnings
 import joblib
 import os
-from tensorflow.keras.models import load_model
+from typing import Dict, List, Any, Optional, Union
 
 warnings.filterwarnings('ignore')
-
-# Smart Farm Recommendation System
 
 MODEL_DIR = 'trained_models'
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-## 1. Load Data
-df = pd.read_csv('Crop_recommendationV2.csv')
-print("Original Data Head:")
-print(df.head())
+class RecommendationSystem:
+    """
+    Manages the machine learning models and logic for crop recommendation.
+    Handles data preprocessing, model training, prediction of indicators,
+    and generation of structured recommendations for sensor adjustments.
+    """
+    def __init__(self, model_dir: str = MODEL_DIR, data_path: str = 'Crop_recommendationV2.csv'):
+        """
+        Initializes the RecommendationSystem, attempting to load models or training them if not found.
+        Args:
+            model_dir (str): Directory where trained models and preprocessing objects are stored.
+            data_path (str): Path to the raw crop recommendation CSV data.
+        """
+        self.model_dir = model_dir
+        self.data_path = data_path
+        self.scaler: Optional[StandardScaler] = None
+        self.pca: Optional[PCA] = None
+        self.label_encoder: Optional[LabelEncoder] = None
+        self.dl_ensemble_models: List[Model] = []
+        self.rf_ensemble_models: List[RandomForestRegressor] = []
+        self.gb_ensemble_models: List[GradientBoostingRegressor] = []
+        self.feature_columns_for_prediction: List[str] = []
+        self.target_indicators: List[str] = ['THI', 'NBR', 'WAI', 'PP', 'SFI']
+        self.crop_ideal_indicator_ranges: Dict[str, Dict[str, tuple[float, float]]] = {}
+        self.controllable_sensors_config = {
+            'N': {'step': 5.0, 'action_type': 'adjust_nutrient', 'nutrient_type': 'N', 'action_param_name': 'amount_mg', 'scale_factor': 5.0, 'min_val': 0.0, 'max_val': 200.0},
+            'P': {'step': 5.0, 'action_type': 'adjust_nutrient', 'nutrient_type': 'P', 'action_param_name': 'amount_mg', 'scale_factor': 5.0, 'min_val': 0.0, 'max_val': 200.0},
+            'K': {'step': 5.0, 'action_type': 'adjust_nutrient', 'nutrient_type': 'K', 'action_param_name': 'amount_mg', 'scale_factor': 5.0, 'min_val': 0.0, 'max_val': 200.0},
+            'soil_moisture': {'step': 5.0, 'action_type': 'water_crop', 'action_param_name': 'amount_ml', 'scale_factor': 100.0, 'min_val': 0.0, 'max_val': 100.0},
+            'sunlight_exposure': {'step': 5.0, 'action_type': 'adjust_lighting', 'action_param_name': 'intensity_percent', 'scale_factor': 1.0, 'min_val': 0.0, 'max_val': 140.0},
+        }
+        self._load_or_train_models()
 
-## 2. Data Cleaning and Preprocessing
-print("\nData Info:")
-df.info()
-print("\nMissing Values:")
-print(df.isnull().sum())
-print("\nData Description:")
-print(df.describe())
+    def _load_or_train_models(self) -> None:
+        """
+        Attempts to load trained models and preprocessing objects from `model_dir`.
+        If any component is not found or an error occurs, it triggers the training process.
+        """
+        scaler_path = os.path.join(self.model_dir, 'scaler.pkl')
+        pca_path = os.path.join(self.model_dir, 'pca.pkl')
+        le_path = os.path.join(self.model_dir, 'label_encoder.pkl')
+        crop_ranges_path = os.path.join(self.model_dir, 'crop_ideal_indicator_ranges.pkl')
+        feature_columns_path = os.path.join(self.model_dir, 'feature_columns.pkl')
 
-### Handle Outliers (Example: using IQR method)
-# Exclude non-numeric columns like 'label' from outlier detection
-numeric_df = df.select_dtypes(include=np.number)
+        models_loaded = False
+        try:
+            print("\nAttempting to load trained models and preprocessing objects...")
+            self.scaler = joblib.load(scaler_path)
+            self.pca = joblib.load(pca_path)
+            self.label_encoder = joblib.load(le_path)
 
-Q1 = numeric_df.quantile(0.25)
-Q3 = numeric_df.quantile(0.75)
-IQR = Q3 - Q1
+            for i in range(3): # Assuming 3 DL models
+                self.dl_ensemble_models.append(load_model(os.path.join(self.model_dir, f'dl_model_{i}.keras')))
+            
+            for i in range(len(self.target_indicators)):
+                self.rf_ensemble_models.append(joblib.load(os.path.join(self.model_dir, f'rf_model_{i}.pkl')))
 
-# Identify outliers in numeric columns
-outlier_mask = ((numeric_df < (Q1 - 1.5 * IQR)) | (numeric_df > (Q3 + 1.5 * IQR))).any(axis=1)
+            for i in range(len(self.target_indicators)):
+                self.gb_ensemble_models.append(joblib.load(os.path.join(self.model_dir, f'gb_model_{i}.pkl')))
+            
+            self.crop_ideal_indicator_ranges = joblib.load(crop_ranges_path)
+            self.feature_columns_for_prediction = joblib.load(feature_columns_path) # Load feature columns
 
-# Filter the original DataFrame using the outlier mask
-df_cleaned = df[~outlier_mask].copy() # Use .copy() to avoid SettingWithCopyWarning
-print(f"\nOriginal shape: {df.shape}")
-print(f"Cleaned shape (after outlier removal): {df_cleaned.shape}")
+            models_loaded = True
+            print("Models and preprocessing objects loaded successfully. Skipping training.")
 
-### Encode 'label' column
-le = LabelEncoder()
-df_cleaned['label_encoded'] = le.fit_transform(df_cleaned['label'])
-print("\nLabel Encoding Applied. Unique encoded labels:")
-print(df_cleaned['label_encoded'].unique())
+        except FileNotFoundError:
+            print("Trained models not found. Proceeding with training...")
+            models_loaded = False
+        except Exception as e:
+            print(f"Error loading models: {e}. Proceeding with training.")
+            models_loaded = False
 
-## 3. Calculate Derived Features
-# Temperature-Humidity Index (THI) - Formula is correct for Celsius, keeping as is.
-df_cleaned['THI'] = df_cleaned['temperature'] - (0.55 - 0.0055 * df_cleaned['humidity']) * (df_cleaned['temperature'] - 14.5)
+        if not models_loaded:
+            self._train_and_save_models()
 
-# Nutrient Balance Ratio (NBR) - Improved Ratio-Based NBI
-# NBI = N + alpha * (P/N) + beta
-alpha_nbr = 1.5
-beta_nbr = 0.5
-# Handle division by zero for NBR: if N is 0, P/N is 0.
-df_cleaned['P_div_N'] = df_cleaned.apply(lambda row: row['P'] / row['N'] if row['N'] != 0 else 0, axis=1)
-df_cleaned['NBR'] = df_cleaned['N'] + alpha_nbr * df_cleaned['P_div_N'] + beta_nbr
-df_cleaned.drop('P_div_N', axis=1, inplace=True) # Drop the temporary column
+    def _preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Performs data cleaning, outlier handling, label encoding, and feature engineering.
+        Args:
+            df (pd.DataFrame): The raw input DataFrame.
+        Returns:
+            pd.DataFrame: The cleaned and feature-engineered DataFrame.
+        """
+        numeric_df = df.select_dtypes(include=np.number)
+        Q1 = numeric_df.quantile(0.25)
+        Q3 = numeric_df.quantile(0.75)
+        IQR = Q3 - Q1
+        outlier_mask = ((numeric_df < (Q1 - 1.5 * IQR)) | (numeric_df > (Q3 + 1.5 * IQR))).any(axis=1)
+        df_cleaned = df[~outlier_mask].copy()
 
-# Water Availability Index (WAI) - Water Balance Index using simplified PET (Hargreaves)
-# PET = 0.0023 * Ra * (T_mean + 17.8) * (T_max - T_min)**0.5
-# Approximations: T_mean = temperature, T_max = temperature + 5, T_min = temperature - 5, Ra = 15 (average extraterrestrial radiation)
-Ra = 15 # MJ/m^2/day, a constant average for simplicity
-T_mean = df_cleaned['temperature']
-T_max = df_cleaned['temperature'] + 5
-T_min = df_cleaned['temperature'] - 5
-# Ensure (T_max - T_min) is non-negative for sqrt
-temp_diff_sqrt = np.sqrt(np.maximum(0, T_max - T_min))
-df_cleaned['PET'] = 0.0023 * Ra * (T_mean + 17.8) * temp_diff_sqrt
-df_cleaned['WAI'] = df_cleaned['soil_moisture'] + df_cleaned['rainfall'] - df_cleaned['PET']
+        self.label_encoder = LabelEncoder()
+        df_cleaned['label_encoded'] = self.label_encoder.fit_transform(df_cleaned['label'])
 
-# Photosynthesis Potential (PP) - Simplified proxy, keeping as is based on user's note.
-df_cleaned['PP'] = df_cleaned['sunlight_exposure'] * df_cleaned['co2_concentration'] * df_cleaned['temperature']
+        df_cleaned['THI'] = df_cleaned['temperature'] - (0.55 - 0.0055 * df_cleaned['humidity']) * (df_cleaned['temperature'] - 14.5)
+        
+        alpha_nbr = 1.5
+        beta_nbr = 0.5
+        df_cleaned['P_div_N'] = df_cleaned.apply(lambda row: row['P'] / row['N'] if row['N'] != 0 else 0, axis=1)
+        df_cleaned['NBR'] = df_cleaned['N'] + alpha_nbr * df_cleaned['P_div_N'] + beta_nbr
+        df_cleaned.drop('P_div_N', axis=1, inplace=True)
 
-# Soil Fertility Index (SFI) - Improved with pH Penalty
-# SFI = Organic_Matter * NBR * f(pH)
-# f(pH) = 1 - (|pH - 6.5| / 6.5)^gamma
-optimal_pH = 6.5
-gamma_sfi = 2
-# Calculate pH stress factor, ensuring absolute difference is used
-pH_stress_factor = 1 - (np.abs(df_cleaned['ph'] - optimal_pH) / optimal_pH)**gamma_sfi
-df_cleaned['SFI'] = df_cleaned['organic_matter'] * df_cleaned['NBR'] * pH_stress_factor
+        Ra = 15
+        T_mean = df_cleaned['temperature']
+        T_max = df_cleaned['temperature'] + 5
+        T_min = df_cleaned['temperature'] - 5
+        temp_diff_sqrt = np.sqrt(np.maximum(0, T_max - T_min))
+        df_cleaned['PET'] = 0.0023 * Ra * (T_mean + 17.8) * temp_diff_sqrt
+        df_cleaned['WAI'] = df_cleaned['soil_moisture'] + df_cleaned['rainfall'] - df_cleaned['PET']
 
-print("\nData Head with Derived Features:")
-print(df_cleaned.head())
+        df_cleaned['PP'] = (df_cleaned['sunlight_exposure'] * df_cleaned['co2_concentration'] * df_cleaned['temperature']) / 10000.0
 
-## 4. Feature Scaling and PCA (for predicting THI)
-# We will predict all derived features as target variables
-target_indicators = ['THI', 'NBR', 'WAI', 'PP', 'SFI']
+        optimal_pH = 6.5
+        gamma_sfi = 2
+        pH_stress_factor = 1 - (np.abs(df_cleaned['ph'] - optimal_pH) / optimal_pH)**gamma_sfi
+        df_cleaned['SFI'] = df_cleaned['organic_matter'] * df_cleaned['NBR'] * pH_stress_factor
+        
+        return df_cleaned
 
-# Define X and y here so they are always available
-X = df_cleaned.drop(['label'] + target_indicators, axis=1) # Drop original label and all derived features
-y = df_cleaned[target_indicators] # Target is now all derived indicators
-
-# Get all feature columns used for training (before scaling/PCA)
-# This needs to be consistent whether models are loaded or trained
-feature_columns_for_prediction = X.columns.tolist()
-
-# Try loading models and preprocessing objects
-scaler_path = os.path.join(MODEL_DIR, 'scaler.pkl')
-pca_path = os.path.join(MODEL_DIR, 'pca.pkl')
-le_path = os.path.join(MODEL_DIR, 'label_encoder.pkl')
-
-dl_ensemble_models = []
-rf_ensemble_models = []
-gb_ensemble_models = []
-
-models_loaded = False
-try:
-    print("\nAttempting to load trained models and preprocessing objects...")
-    scaler = joblib.load(scaler_path)
-    pca = joblib.load(pca_path)
-    le = joblib.load(le_path)
-
-    # Load DL models
-    for i in range(3): # Assuming 3 DL models
-        dl_ensemble_models.append(load_model(os.path.join(MODEL_DIR, f'dl_model_{i}.keras')))
-    
-    # Load RF models
-    for i in range(len(target_indicators)):
-        rf_ensemble_models.append(joblib.load(os.path.join(MODEL_DIR, f'rf_model_{i}.pkl')))
-
-    # Load GB models
-    for i in range(len(target_indicators)):
-        gb_ensemble_models.append(joblib.load(os.path.join(MODEL_DIR, f'gb_model_{i}.pkl')))
-    
-    models_loaded = True
-    print("Models and preprocessing objects loaded successfully. Skipping training.")
-
-except FileNotFoundError:
-    print("Trained models not found. Proceeding with training...")
-    models_loaded = False
-except Exception as e:
-    print(f"Error loading models: {e}. Proceeding with training.")
-    models_loaded = False
-
-if not models_loaded:
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    pca = PCA(n_components=0.95) # Retain 95% of variance
-    X_pca = pca.fit_transform(X_scaled)
-
-    print(f"\nOriginal number of features: {X.shape[1]}")
-    print(f"Number of features after PCA: {X_pca.shape[1]}")
-
-    X_train, X_test, y_train, y_test = train_test_split(X_pca, y, test_size=0.2, random_state=42)
-
-    # Function to create a base Deep Learning model
-    def create_base_dl_model(input_dim, output_dim):
+    def _create_base_dl_model(self, input_dim: int, output_dim: int) -> Model:
+        """
+        Creates a sequential Deep Learning model for regression.
+        Args:
+            input_dim (int): The number of input features.
+            output_dim (int): The number of output targets.
+        Returns:
+            Model: A compiled Keras Sequential model.
+        """
         model = Sequential([
             Dense(128, activation='relu', input_shape=(input_dim,)),
             Dropout(0.3),
@@ -171,189 +155,370 @@ if not models_loaded:
         model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mean_absolute_error'])
         return model
 
-    # To store predictions on X_test for overall ensemble evaluation
-    all_model_test_predictions = []
+    def _train_and_save_models(self) -> None:
+        """
+        Trains all ensemble models (DL, RandomForest, GradientBoosting) and saves them
+        along with preprocessing objects (scaler, PCA, label encoder) and crop ideal ranges.
+        """
+        df = pd.read_csv(self.data_path)
+        df_cleaned = self._preprocess_data(df.copy())
 
-    print("\nTraining Diverse Models for Ensemble...")
+        X = df_cleaned.drop(['label'] + self.target_indicators, axis=1)
+        y = df_cleaned[self.target_indicators]
+        self.feature_columns_for_prediction = X.columns.tolist()
 
-    # 1. Deep Learning Models (3 instances)
-    num_dl_models = 3
-    dl_test_predictions = []
-    for i in range(num_dl_models):
-        print(f"Training Deep Learning Model {i+1}/{num_dl_models}...")
-        dl_model = create_base_dl_model(X_train.shape[1], len(target_indicators))
-        dl_model.fit(X_train, y_train, epochs=50, batch_size=32, validation_split=0.2, verbose=0)
+        self.scaler = StandardScaler()
+        X_scaled = self.scaler.fit_transform(X)
+
+        self.pca = PCA(n_components=0.95)
+        X_pca = self.pca.fit_transform(X_scaled)
+
+        X_train, X_test, y_train, y_test = train_test_split(X_pca, y, test_size=0.2, random_state=42)
+
+        all_model_test_predictions: List[np.ndarray] = []
+
+        print("\nTraining Diverse Models for Ensemble...")
+
+        num_dl_models = 3
+        dl_test_predictions: List[np.ndarray] = []
+        for i in range(num_dl_models):
+            print(f"Training Deep Learning Model {i+1}/{num_dl_models}...")
+            dl_model = self._create_base_dl_model(X_train.shape[1], len(self.target_indicators))
+            dl_model.fit(X_train, y_train, epochs=50, batch_size=32, validation_split=0.2, verbose=0)
+            
+            loss, mae = dl_model.evaluate(X_test, y_test, verbose=0)
+            print(f"DL Model {i+1} - Mean Squared Error: {loss:.4f}, Mean Absolute Error: {mae:.4f}")
+            
+            self.dl_ensemble_models.append(dl_model)
+            dl_test_predictions.append(dl_model.predict(X_test, verbose=0))
+
+        if dl_test_predictions:
+            avg_dl_test_predictions = np.mean(dl_test_predictions, axis=0)
+            all_model_test_predictions.append(avg_dl_test_predictions)
+
+        print("\nTraining Random Forest Regressor (multi-output)...")
+        rf_preds_test_individual: List[np.ndarray] = []
+        for i, indicator in enumerate(self.target_indicators):
+            print(f"  Training Random Forest for {indicator}...")
+            rf_model_single = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+            rf_model_single.fit(X_train, y_train[indicator])
+            rf_preds_test_individual.append(rf_model_single.predict(X_test))
+            self.rf_ensemble_models.append(rf_model_single)
+
+        rf_pred_test_combined = np.column_stack(rf_preds_test_individual)
+        rf_loss = np.mean((rf_pred_test_combined - y_test.values)**2)
+        rf_mae = np.mean(np.abs(rf_pred_test_combined - y_test.values))
+        print(f"Random Forest Ensemble - Mean Squared Error: {rf_loss:.4f}, Mean Absolute Error: {rf_mae:.4f}")
+        all_model_test_predictions.append(rf_pred_test_combined)
+
+        print("\nTraining Gradient Boosting Regressor (multi-output)...")
+        gb_preds_test_individual: List[np.ndarray] = []
+        for i, indicator in enumerate(self.target_indicators):
+            print(f"  Training Gradient Boosting for {indicator}...")
+            gb_model_single = GradientBoostingRegressor(n_estimators=100, random_state=42)
+            gb_model_single.fit(X_train, y_train[indicator])
+            gb_preds_test_individual.append(gb_model_single.predict(X_test))
+            self.gb_ensemble_models.append(gb_model_single)
+
+        gb_pred_test_combined = np.column_stack(gb_preds_test_individual)
+        gb_loss = np.mean((gb_pred_test_combined - y_test.values)**2)
+        gb_mae = np.mean(np.abs(gb_pred_test_combined - y_test.values))
+        print(f"Gradient Boosting Ensemble - Mean Squared Error: {gb_loss:.4f}, Mean Absolute Error: {gb_mae:.4f}")
+        all_model_test_predictions.append(gb_pred_test_combined)
+
+        y_pred_overall_ensemble = np.mean(all_model_test_predictions, axis=0)
+        overall_ensemble_loss = np.mean((y_pred_overall_ensemble - y_test.values)**2)
+        overall_ensemble_mae = np.mean(np.abs(y_pred_overall_ensemble - y_test.values))
+
+        print(f"\nOverall Ensemble Model Mean Squared Error (averaged predictions): {overall_ensemble_loss:.4f}")
+        print(f"Overall Ensemble Model Mean Absolute Error (averaged predictions): {overall_ensemble_mae:.4f}")
+
+        print("\nSaving trained models and preprocessing objects...")
+        joblib.dump(self.scaler, os.path.join(self.model_dir, 'scaler.pkl'))
+        joblib.dump(self.pca, os.path.join(self.model_dir, 'pca.pkl'))
+        joblib.dump(self.label_encoder, os.path.join(self.model_dir, 'label_encoder.pkl'))
+
+        for i, dl_model in enumerate(self.dl_ensemble_models):
+            dl_model.save(os.path.join(self.model_dir, f'dl_model_{i}.keras'))
+
+        for i, rf_model in enumerate(self.rf_ensemble_models):
+            joblib.dump(rf_model, os.path.join(self.model_dir, f'rf_model_{i}.pkl'))
+
+        for i, gb_model in enumerate(self.gb_ensemble_models):
+            joblib.dump(gb_model, os.path.join(self.model_dir, f'gb_model_{i}.pkl'))
         
-        loss, mae = dl_model.evaluate(X_test, y_test, verbose=0)
-        print(f"DL Model {i+1} - Mean Squared Error: {loss:.4f}, Mean Absolute Error: {mae:.4f}")
+        joblib.dump(self.feature_columns_for_prediction, os.path.join(self.model_dir, 'feature_columns.pkl')) # Save feature columns
+        self._calculate_and_save_crop_ideal_ranges(df_cleaned)
+        print("Models and preprocessing objects saved successfully.")
+
+    def _calculate_and_save_crop_ideal_ranges(self, df_cleaned: pd.DataFrame) -> None:
+        """
+        Calculates and saves crop-specific ideal indicator ranges based on mean +/- 1 standard deviation.
+        Args:
+            df_cleaned (pd.DataFrame): The cleaned DataFrame containing crop data and derived indicators.
+        """
+        crop_ideal_indicator_ranges: Dict[str, Dict[str, tuple[float, float]]] = {}
+        for crop_label in df_cleaned['label'].unique():
+            crop_data = df_cleaned[df_cleaned['label'] == crop_label]
+            ranges: Dict[str, tuple[float, float]] = {}
+            for indicator in self.target_indicators:
+                mean_val = crop_data[indicator].mean()
+                std_val = crop_data[indicator].std()
+                min_val = mean_val - std_val
+                max_val = mean_val + std_val
+                ranges[indicator] = (min_val, max_val)
+            crop_ideal_indicator_ranges[crop_label] = ranges
+        self.crop_ideal_indicator_ranges = crop_ideal_indicator_ranges
+        joblib.dump(self.crop_ideal_indicator_ranges, os.path.join(self.model_dir, 'crop_ideal_indicator_ranges.pkl'))
+        print("\nCalculated and saved Crop-Specific Ideal Indicator Ranges (Mean +/- 1 Std Dev).")
+
+    def predict_indicators(self, input_data: Dict[str, float]) -> Dict[str, float]:
+        """
+        Predicts target indicators based on input sensor data using the ensemble model.
+        Args:
+            input_data (Dict[str, float]): A dictionary of current sensor readings.
+        Returns:
+            Dict[str, float]: Predicted values for each target indicator.
+        """
+        if not all([self.scaler, self.pca, self.dl_ensemble_models, self.rf_ensemble_models, self.gb_ensemble_models, self.feature_columns_for_prediction]):
+            raise RuntimeError("Recommendation system components not fully loaded or trained.")
+
+        # Create a DataFrame from input_data, ensuring all feature columns are present
+        # Fill any missing feature columns with 0 (or a more appropriate default/imputed value)
+        input_df = pd.DataFrame([input_data])
+        for col in self.feature_columns_for_prediction:
+            if col not in input_df.columns:
+                input_df[col] = 0.0 # Fill with 0 for missing sensor readings
+        input_df = input_df[self.feature_columns_for_prediction] # Ensure column order
+
+        input_scaled = self.scaler.transform(input_df)
+        input_pca = self.pca.transform(input_scaled)
+
+        all_individual_predictions: List[np.ndarray] = []
+
+        dl_individual_predictions = [model.predict(input_pca, verbose=0)[0] for model in self.dl_ensemble_models]
+        if dl_individual_predictions:
+            all_individual_predictions.append(np.mean(dl_individual_predictions, axis=0))
+
+        rf_scalar_predictions = [model.predict(input_pca)[0] for model in self.rf_ensemble_models]
+        if rf_scalar_predictions:
+            all_individual_predictions.append(np.array(rf_scalar_predictions))
+
+        gb_scalar_predictions = [model.predict(input_pca)[0] for model in self.gb_ensemble_models]
+        if gb_scalar_predictions:
+            all_individual_predictions.append(np.array(gb_scalar_predictions))
         
-        dl_ensemble_models.append(dl_model)
-        dl_test_predictions.append(dl_model.predict(X_test))
+        ensembled_predictions = np.mean(all_individual_predictions, axis=0)
+        
+        return dict(zip(self.target_indicators, ensembled_predictions))
 
-    # Average DL model predictions for ensemble
-    if dl_test_predictions:
-        avg_dl_test_predictions = np.mean(dl_test_predictions, axis=0)
-        all_model_test_predictions.append(avg_dl_test_predictions)
+    def _calculate_indicator_gradients(self, current_sensor_data: Dict[str, float], 
+                                        predicted_indicators_dict: Dict[str, float]) -> Dict[str, Dict[str, float]]:
+        """
+        Calculates the approximate gradient (impact per unit change) of each controllable sensor
+        on each target indicator using perturbation.
+        Args:
+            current_sensor_data (Dict[str, float]): The current raw sensor readings.
+            predicted_indicators_dict (Dict[str, float]): Predicted values for each target indicator.
+        Returns:
+            Dict[str, Dict[str, float]]: A dictionary where keys are sensor names, and values are
+                                         dictionaries of indicator impacts (gradients).
+        """
+        gradients: Dict[str, Dict[str, float]] = {sensor: {} for sensor in self.controllable_sensors_config.keys()}
 
-    # 2. Random Forest Regressor (one model per target indicator)
-    print("\nTraining Random Forest Regressor (multi-output)...")
-    rf_preds_test_individual = []
-    for i, indicator in enumerate(target_indicators):
-        print(f"  Training Random Forest for {indicator}...")
-        rf_model_single = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-        rf_model_single.fit(X_train, y_train[indicator])
-        rf_preds_test_individual.append(rf_model_single.predict(X_test))
-        rf_ensemble_models.append(rf_model_single)
+        for sensor_name, config in self.controllable_sensors_config.items():
+            if sensor_name not in current_sensor_data:
+                continue
 
-    rf_pred_test_combined = np.column_stack(rf_preds_test_individual)
-    rf_loss = np.mean((rf_pred_test_combined - y_test.values)**2)
-    rf_mae = np.mean(np.abs(rf_pred_test_combined - y_test.values))
-    print(f"Random Forest Ensemble - Mean Squared Error: {rf_loss:.4f}, Mean Absolute Error: {rf_mae:.4f}")
-    all_model_test_predictions.append(rf_pred_test_combined)
+            original_sensor_value = current_sensor_data[sensor_name]
+            perturbation_step = config['step']
 
-    # 3. Gradient Boosting Regressor (one model per target indicator)
-    print("\nTraining Gradient Boosting Regressor (multi-output)...")
-    gb_preds_test_individual = []
-    for i, indicator in enumerate(target_indicators):
-        print(f"  Training Gradient Boosting for {indicator}...")
-        gb_model_single = GradientBoostingRegressor(n_estimators=100, random_state=42)
-        gb_model_single.fit(X_train, y_train[indicator])
-        gb_preds_test_individual.append(gb_model_single.predict(X_test))
-        gb_ensemble_models.append(gb_model_single)
+            # Perturb upwards
+            perturbed_data_increase = current_sensor_data.copy()
+            perturbed_data_increase[sensor_name] = min(original_sensor_value + perturbation_step, config['max_val'])
+            predicted_after_increase = self.predict_indicators(perturbed_data_increase)
 
-    gb_pred_test_combined = np.column_stack(gb_preds_test_individual)
-    gb_loss = np.mean((gb_pred_test_combined - y_test.values)**2)
-    gb_mae = np.mean(np.abs(gb_pred_test_combined - y_test.values))
-    print(f"Gradient Boosting Ensemble - Mean Squared Error: {gb_loss:.4f}, Mean Absolute Error: {gb_mae:.4f}")
-    all_model_test_predictions.append(gb_pred_test_combined)
+            # Perturb downwards
+            perturbed_data_decrease = current_sensor_data.copy()
+            perturbed_data_decrease[sensor_name] = max(original_sensor_value - perturbation_step, config['min_val'])
+            predicted_after_decrease = self.predict_indicators(perturbed_data_decrease)
 
-    # Evaluate the overall ensemble model using the averaged predictions
-    y_pred_overall_ensemble = np.mean(all_model_test_predictions, axis=0)
-    overall_ensemble_loss = np.mean((y_pred_overall_ensemble - y_test.values)**2)
-    overall_ensemble_mae = np.mean(np.abs(y_pred_overall_ensemble - y_test.values))
+            for indicator in self.target_indicators:
+                impact_increase = predicted_after_increase.get(indicator, predicted_indicators_dict.get(indicator, 0.0)) - predicted_indicators_dict.get(indicator, 0.0)
+                impact_decrease = predicted_after_decrease.get(indicator, predicted_indicators_dict.get(indicator, 0.0)) - predicted_indicators_dict.get(indicator, 0.0)
+                
+                # Approximate gradient as average of forward and backward perturbation impacts
+                # Or, if only one direction is possible due to bounds, use that.
+                if original_sensor_value + perturbation_step > config['max_val'] and original_sensor_value - perturbation_step < config['min_val']:
+                    gradient = 0.0 # Cannot perturb in either direction
+                elif original_sensor_value + perturbation_step > config['max_val']:
+                    gradient = impact_decrease / (-perturbation_step) if perturbation_step != 0 else 0.0
+                elif original_sensor_value - perturbation_step < config['min_val']:
+                    gradient = impact_increase / perturbation_step if perturbation_step != 0 else 0.0
+                else:
+                    gradient = (impact_increase - impact_decrease) / (2 * perturbation_step) if perturbation_step != 0 else 0.0
+                
+                gradients[sensor_name][indicator] = gradient
+        return gradients
 
-    print(f"\nOverall Ensemble Model Mean Squared Error (averaged predictions): {overall_ensemble_loss:.4f}")
-    print(f"Overall Ensemble Model Mean Absolute Error (averaged predictions): {overall_ensemble_mae:.4f}")
+    def _calculate_optimal_sensor_adjustments(self, current_sensor_data: Dict[str, float], 
+                                              predicted_indicators_dict: Dict[str, float], 
+                                              crop_label: str) -> List[Dict[str, Any]]:
+        """
+        Uses gradient-based analysis to find optimal sensor adjustments to bring indicators
+        towards their ideal ranges.
+        Args:
+            current_sensor_data (Dict[str, float]): The current raw sensor readings.
+            predicted_indicators_dict (Dict[str, float]): Predicted values for each target indicator.
+            crop_label (str): The type of crop being grown.
+        Returns:
+            List[Dict[str, Any]]: A list of structured recommendations for sensor adjustments.
+        """
+        recommendations: List[Dict[str, Any]] = []
+        if crop_label not in self.crop_ideal_indicator_ranges:
+            recommendations.append({"action": "notify_user", "message": f"No ideal ranges defined for crop: {crop_label}. Cannot perform gradient analysis."})
+            return recommendations
 
-## 6. Save Trained Models and Preprocessing Objects
-print("\nSaving trained models and preprocessing objects...")
-joblib.dump(scaler, os.path.join(MODEL_DIR, 'scaler.pkl'))
-joblib.dump(pca, os.path.join(MODEL_DIR, 'pca.pkl'))
-joblib.dump(le, os.path.join(MODEL_DIR, 'label_encoder.pkl')) # Save label encoder as well
+        ideal_ranges = self.crop_ideal_indicator_ranges[crop_label]
+        
+        # Calculate gradients for all controllable sensors on all target indicators
+        gradients = self._calculate_indicator_gradients(current_sensor_data, predicted_indicators_dict)
 
-for i, dl_model in enumerate(dl_ensemble_models):
-    dl_model.save(os.path.join(MODEL_DIR, f'dl_model_{i}.keras')) # Keras models saved in .keras format
+        # Determine the desired change for each indicator
+        indicator_targets: Dict[str, float] = {}
+        for indicator, predicted_value in predicted_indicators_dict.items():
+            if indicator not in ideal_ranges:
+                continue
 
-for i, rf_model in enumerate(rf_ensemble_models):
-    joblib.dump(rf_model, os.path.join(MODEL_DIR, f'rf_model_{i}.pkl'))
-
-for i, gb_model in enumerate(gb_ensemble_models):
-    joblib.dump(gb_model, os.path.join(MODEL_DIR, f'gb_model_{i}.pkl'))
-print("Models and preprocessing objects saved successfully.")
-
-## 7. Calculate Crop-Specific Ideal Indicator Ranges
-# Calculate the mean and standard deviation for each indicator, grouped by crop label,
-# and define the ideal range as mean +/- 1 standard deviation.
-crop_ideal_indicator_ranges = {}
-for crop_label in df_cleaned['label'].unique():
-    crop_data = df_cleaned[df_cleaned['label'] == crop_label]
-    ranges = {}
-    for indicator in target_indicators:
-        mean_val = crop_data[indicator].mean()
-        std_val = crop_data[indicator].std()
-        # Define range as mean +/- 1 standard deviation
-        min_val = mean_val - std_val
-        max_val = mean_val + std_val
-        ranges[indicator] = (min_val, max_val)
-    crop_ideal_indicator_ranges[crop_label] = ranges
-
-print("\nCalculated Crop-Specific Ideal Indicator Ranges (Mean +/- 1 Std Dev):")
-for crop, ranges in crop_ideal_indicator_ranges.items():
-    print(f"  {crop}:")
-    for indicator, (min_val, max_val) in ranges.items():
-        print(f"    {indicator}: ({min_val:.2f}, {max_val:.2f})")
-
-## 8. Predictive Analysis and Inverse Recommendation System
-
-# The goal is to predict multiple indicators and then, given ideal indicator values,
-# suggest changes to sensor values.
-
-### Example Usage of Prediction Function for Multiple Indicators
-def predict_indicators_ensemble(input_data, scaler_obj, pca_obj, dl_models, rf_models, gb_models, feature_columns, target_indicators_list):
-    # Ensure input_data is a DataFrame with correct columns
-    input_df = pd.DataFrame([input_data], columns=feature_columns)
-
-    # Scale the input data
-    input_scaled = scaler_obj.transform(input_df)
-
-    # Apply PCA
-    input_pca = pca_obj.transform(input_scaled)
-
-    all_individual_predictions = []
-
-    # Get predictions from DL models
-    dl_individual_predictions = [model.predict(input_pca)[0] for model in dl_models]
-    if dl_individual_predictions:
-        all_individual_predictions.append(np.mean(dl_individual_predictions, axis=0))
-
-    # Get predictions from Random Forest models
-    rf_individual_predictions = [model.predict(input_pca)[0] for model in rf_models]
-    if rf_individual_predictions:
-        all_individual_predictions.append(np.column_stack(rf_individual_predictions)[0])
-
-    # Get predictions from Gradient Boosting models
-    gb_individual_predictions = [model.predict(input_pca)[0] for model in gb_models]
-    if gb_individual_predictions:
-        all_individual_predictions.append(np.column_stack(gb_individual_predictions)[0])
-    
-    # Average the predictions from all model types
-    ensembled_predictions = np.mean(all_individual_predictions, axis=0)
-    
-    return dict(zip(target_indicators_list, ensembled_predictions))
-
-# Get all feature columns used for training
-feature_columns_for_prediction = X.columns.tolist()
-
-# Create a sample input based on a random entry from the dataset
-sample_entry = df_cleaned.drop(['label'] + target_indicators, axis=1).sample(1, random_state=42).iloc[0].to_dict()
-
-# Predict all indicators for the sample input using the ensemble
-predicted_indicators = predict_indicators_ensemble(sample_entry, scaler, pca, dl_ensemble_models, rf_ensemble_models, gb_ensemble_models, feature_columns_for_prediction, target_indicators)
-print(f"\nSample Input: {sample_entry}")
-print(f"Predicted Indicators (Ensemble): {predicted_indicators}")
-
-### Inverse Recommendation Function (Conceptual - requires more advanced techniques)
-# This is a placeholder for a function that would take desired indicator values
-# and suggest changes to input sensor values. This is a complex inverse problem
-# that typically requires optimization, reinforcement learning, or a separate
-# inverse model.
-
-# For a simplified approach, we can define "ideal" ranges for indicators
-# and then suggest adjustments to sensor values based on deviations.
-# This would be similar to the original `recommend_actions` but for indicators.
-
-# Let's define a simple function to suggest sensor adjustments based on predicted indicators
-# and some hypothetical ideal ranges.
-
-def recommend_sensor_changes_from_indicators(predicted_indicators_dict, crop_label, crop_ideal_ranges_dict):
-    recommendations = []
-    if crop_label not in crop_ideal_ranges_dict:
-        recommendations.append(f"No ideal ranges defined for crop: {crop_label}. Using general recommendations.")
-        # Fallback to a general range if specific not found, or handle as an error
-        # For now, if no specific range, we'll just note it.
-        ideal_ranges = {} # No fallback to arbitrary general ranges
-    else:
-        ideal_ranges = crop_ideal_ranges_dict[crop_label]
-
-    for indicator, predicted_value in predicted_indicators_dict.items():
-        if indicator in ideal_ranges:
             ideal_min, ideal_max = ideal_ranges[indicator]
+            
             if predicted_value < ideal_min:
-                recommendations.append(f"For {crop_label}, increase conditions affecting {indicator} (e.g., adjust temperature, humidity, NPK). Predicted {indicator}: {predicted_value:.2f}, Ideal: {ideal_min:.2f}-{ideal_max:.2f}")
+                indicator_targets[indicator] = ideal_min - predicted_value # Need to increase indicator
+                recommendations.append({"action": "notify_user", "message": f"Predicted {indicator}: {predicted_value:.2f} is below ideal range ({ideal_min:.2f}-{ideal_max:.2f}). Target increase: {indicator_targets[indicator]:.2f}"})
             elif predicted_value > ideal_max:
-                recommendations.append(f"For {crop_label}, decrease conditions affecting {indicator} (e.g., adjust temperature, humidity, NPK). Predicted {indicator}: {predicted_value:.2f}, Ideal: {ideal_min:.2f}-{ideal_max:.2f}")
+                indicator_targets[indicator] = ideal_max - predicted_value # Need to decrease indicator
+                recommendations.append({"action": "notify_user", "message": f"Predicted {indicator}: {predicted_value:.2f} is above ideal range ({ideal_min:.2f}-{ideal_max:.2f}). Target decrease: {abs(indicator_targets[indicator]):.2f}"})
             else:
-                recommendations.append(f"For {crop_label}, {indicator} is within ideal range. Predicted: {predicted_value:.2f}, Ideal: {ideal_min:.2f}-{ideal_max:.2f}")
-        else:
-            recommendations.append(f"No ideal range defined for {indicator} for crop {crop_label}.")
-    return recommendations
+                recommendations.append({"action": "notify_user", "message": f"Predicted {indicator}: {predicted_value:.2f} is within ideal range ({ideal_min:.2f}-{ideal_max:.2f})."})
+        
+        if not indicator_targets:
+            recommendations.append({"action": "notify_user", "message": "All indicators are within ideal ranges. No adjustments needed."})
+            return recommendations
+
+        # Calculate sensor adjustments based on gradients and indicator targets
+        # This is a simplified approach. A more advanced method might use a pseudo-inverse or iterative optimization.
+        sensor_adjustments: Dict[str, float] = {sensor: 0.0 for sensor in self.controllable_sensors_config.keys()}
+        learning_rate = 0.5 # Heuristic learning rate for adjustments
+
+        for sensor_name, sensor_config in self.controllable_sensors_config.items():
+            if sensor_name not in current_sensor_data:
+                continue
+            
+            total_adjustment_for_sensor = 0.0
+            for indicator, target_change in indicator_targets.items():
+                gradient = gradients.get(sensor_name, {}).get(indicator, 0.0)
+                
+                if abs(gradient) > 1e-5: # Avoid division by zero or negligible gradients
+                    # How much this sensor needs to change to achieve the target for this indicator
+                    # We want (gradient * delta_sensor) to be approximately target_change
+                    # So, delta_sensor = target_change / gradient
+                    # We sum these up, weighted by the magnitude of the target change
+                    total_adjustment_for_sensor += (target_change / gradient) * abs(target_change)
+            
+            # Apply a weighted average if multiple indicators influence this sensor
+            if any(abs(indicator_targets[ind]) > 0 for ind in indicator_targets):
+                sensor_adjustments[sensor_name] = learning_rate * (total_adjustment_for_sensor / sum(abs(tc) for tc in indicator_targets.values()))
+            else:
+                sensor_adjustments[sensor_name] = 0.0
+
+            # Apply bounds to the raw sensor adjustment
+            original_sensor_value = current_sensor_data[sensor_name]
+            proposed_new_value = original_sensor_value + sensor_adjustments[sensor_name]
+            
+            # Clamp the proposed value within the sensor's operational limits
+            clamped_value = max(sensor_config['min_val'], min(proposed_new_value, sensor_config['max_val']))
+            sensor_adjustments[sensor_name] = clamped_value - original_sensor_value # Store the actual change
+
+        # Generate structured recommendations from calculated adjustments
+        for sensor_name, raw_sensor_change in sensor_adjustments.items():
+            if abs(raw_sensor_change) < 0.01: # Only recommend significant changes
+                continue
+
+            sensor_config = self.controllable_sensors_config[sensor_name]
+            action_amount = 0.0
+            action_message_suffix = ""
+
+            if sensor_config['action_type'] == 'water_crop':
+                action_amount = max(0, min(1000, raw_sensor_change * sensor_config.get('scale_factor', 1.0))) # Amount in ml
+                action_message_suffix = f" ({round(action_amount, 2)} ml)"
+            elif sensor_config['action_type'] == 'adjust_nutrient':
+                action_amount = max(0, min(200, raw_sensor_change * sensor_config.get('scale_factor', 1.0))) # Amount in mg
+                action_message_suffix = f" ({round(action_amount, 2)} mg)"
+            elif sensor_config['action_type'] == 'adjust_lighting':
+                # Convert target sunlight_exposure to intensity_percent (0-100)
+                current_sunlight_exposure = current_sensor_data[sensor_name]
+                target_sunlight_exposure = current_sunlight_exposure + raw_sensor_change
+                
+                sunlight_min = sensor_config['min_val']
+                sunlight_max = sensor_config['max_val']
+                
+                # Cap target_sensor_value within sensor's min/max
+                target_sunlight_exposure = max(sunlight_min, min(sunlight_max, target_sunlight_exposure))
+                
+                # Convert to percentage
+                intensity_percent = ((target_sunlight_exposure - sunlight_min) / (sunlight_max - sunlight_min)) * 100.0
+                action_amount = max(0, min(100, intensity_percent)) # Cap percentage between 0-100
+                action_message_suffix = f" ({round(action_amount, 2)}%)"
+            
+            action_dict = {
+                "action": sensor_config['action_type'],
+                sensor_config['action_param_name']: round(action_amount, 2)
+            }
+            if 'nutrient_type' in sensor_config:
+                action_dict['nutrient_type'] = sensor_config['nutrient_type']
+            recommendations.append(action_dict)
+            recommendations.append({"action": "notify_user", "message": f"Recommended {sensor_config['action_type']}{action_message_suffix} for {sensor_name} (change: {raw_sensor_change:.2f})."})
+        
+        if not recommendations:
+            recommendations.append({"action": "notify_user", "message": "No significant sensor adjustments calculated."})
+
+        return recommendations
+
+    def recommend_sensor_changes_from_indicators(self, predicted_indicators_dict: Dict[str, float], crop_label: str, current_sensor_data: Dict[str, float]) -> List[Dict[str, Any]]:
+        """
+        Generates structured recommendations for sensor changes based on predicted indicators
+        and crop-specific ideal ranges, using the new gradient-like analysis.
+        Args:
+            predicted_indicators_dict (Dict[str, float]): Predicted values for each target indicator.
+            crop_label (str): The type of crop being grown.
+            current_sensor_data (Dict[str, float]): The current raw sensor readings (needed for perturbation).
+        Returns:
+            List[Dict[str, Any]]: A list of structured recommendations. Each dict contains 'action', 'target', 'value', etc.
+        """
+        # First, get the intelligent recommendations from the new method
+        intelligent_recommendations = self._calculate_optimal_sensor_adjustments(
+            current_sensor_data, predicted_indicators_dict, crop_label
+        )
+        
+        # You can choose to combine these with the old rule-based system or replace it entirely.
+        # For now, let's replace it to prioritize the gradient-based approach.
+        return intelligent_recommendations
+
+if __name__ == "__main__":
+    print("Initializing Recommendation System for training/loading...")
+    rec_system = RecommendationSystem()
+    print("Recommendation System ready.")
+    
+    df = pd.read_csv('Crop_recommendationV2.csv')
+    df_cleaned = rec_system._preprocess_data(df.copy())
+    sample_entry = df_cleaned.drop(['label'] + rec_system.target_indicators, axis=1).sample(1, random_state=42).iloc[0].to_dict()
+
+    predicted_indicators = rec_system.predict_indicators(sample_entry)
+    print(f"\nSample Input: {sample_entry}")
+    print(f"Predicted Indicators (Ensemble): {predicted_indicators}")
+
+    sample_crop = df_cleaned.sample(1, random_state=42)['label'].iloc[0]
+    recommendations = rec_system.recommend_sensor_changes_from_indicators(predicted_indicators, sample_crop)
+    print(f"\nRecommendations for {sample_crop}:")
+    for rec in recommendations:
+        print(f"- {rec}")

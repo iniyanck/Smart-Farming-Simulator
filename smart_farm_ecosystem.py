@@ -4,23 +4,17 @@ import pandas as pd
 import numpy as np
 from threading import Thread, Event, Lock
 from collections import deque
+from typing import Dict, List, Any, Optional, Union
 
-# Placeholder for the recommendation system components
-# These will be loaded from smart_farm_recommendation.py
-scaler = None
-pca = None
-dl_ensemble_models = []
-rf_ensemble_models = []
-gb_ensemble_models = []
-feature_columns_for_prediction = []
-target_indicators = []
-crop_ideal_indicator_ranges = {}
-predict_indicators_ensemble_func = None
-recommend_sensor_changes_from_indicators_func = None
+from smart_farm_recommendation import RecommendationSystem # Import the new class
 
 # --- 1. Sensor Simulation Module ---
 class Sensor:
-    def __init__(self, name, unit, min_val, max_val, current_val=None, drift_rate=0.1, noise_level=0.5):
+    """
+    Simulates a single sensor with drift and noise.
+    """
+    def __init__(self, name: str, unit: str, min_val: float, max_val: float, 
+                 current_val: Optional[float] = None, drift_rate: float = 0.1, noise_level: float = 0.5):
         self.name = name
         self.unit = unit
         self.min_val = min_val
@@ -30,42 +24,69 @@ class Sensor:
         self.noise_level = noise_level
         self.lock = Lock()
 
-    def _simulate_drift(self):
+    def _simulate_drift(self) -> None:
+        """Applies a random drift to the sensor's current value."""
         drift = random.uniform(-self.drift_rate, self.drift_rate)
         self._current_val += drift
         self._current_val = max(self.min_val, min(self.max_val, self._current_val))
 
-    def _add_noise(self):
+    def _add_noise(self) -> None:
+        """Adds random noise to the sensor's current value."""
         noise = random.uniform(-self.noise_level, self.noise_level)
         self._current_val += noise
         self._current_val = max(self.min_val, min(self.max_val, self._current_val))
 
-    def get_value(self):
+    def get_value(self) -> float:
+        """
+        Retrieves the current sensor value after simulating drift and noise.
+        Returns:
+            float: The current (simulated) value of the sensor.
+        """
         with self.lock:
             self._simulate_drift()
             self._add_noise()
             return round(self._current_val, 2)
 
-    def set_value(self, new_val):
+    def set_value(self, new_val: float) -> None:
+        """
+        Manually sets a new value for the sensor, clamping it within min/max bounds.
+        Args:
+            new_val (float): The new value to set for the sensor.
+        """
         with self.lock:
             self._current_val = max(self.min_val, min(self.max_val, new_val))
             print(f"Manual override: {self.name} set to {self._current_val:.2f} {self.unit}")
 
 class SensorGroup:
-    def __init__(self, group_name, sensors_config):
+    """
+    Manages a collection of Sensor objects for a specific farm plot.
+    """
+    def __init__(self, group_name: str, sensors_config: List[Dict[str, Any]]):
         self.group_name = group_name
         self.sensors = {s['name']: Sensor(s['name'], s['unit'], s['min'], s['max'], s.get('initial_val')) for s in sensors_config}
         self.lock = Lock()
 
-    def get_all_sensor_data(self):
+    def get_all_sensor_data(self) -> Dict[str, float]:
+        """
+        Retrieves the current values from all sensors in the group.
+        Returns:
+            Dict[str, float]: A dictionary where keys are sensor names and values are their readings.
+        """
         with self.lock:
             return {name: sensor.get_value() for name, sensor in self.sensors.items()}
 
-    def get_sensor(self, sensor_name):
+    def get_sensor(self, sensor_name: str) -> Optional[Sensor]:
+        """
+        Retrieves a specific sensor by its name.
+        Args:
+            sensor_name (str): The name of the sensor to retrieve.
+        Returns:
+            Optional[Sensor]: The Sensor object if found, otherwise None.
+        """
         return self.sensors.get(sensor_name)
 
 # Define sensor configurations for a typical farm plot
-FARM_SENSORS_CONFIG = [
+FARM_SENSORS_CONFIG: List[Dict[str, Any]] = [
     {'name': 'N', 'unit': 'ppm', 'min': 0, 'max': 140, 'initial_val': 70},
     {'name': 'P', 'unit': 'ppm', 'min': 0, 'max': 145, 'initial_val': 60},
     {'name': 'K', 'unit': 'ppm', 'min': 0, 'max': 205, 'initial_val': 90},
@@ -74,20 +95,32 @@ FARM_SENSORS_CONFIG = [
     {'name': 'ph', 'unit': '', 'min': 0, 'max': 14, 'initial_val': 6.5},
     {'name': 'rainfall', 'unit': 'mm', 'min': 0, 'max': 300, 'initial_val': 100},
     {'name': 'soil_moisture', 'unit': '%', 'min': 0, 'max': 100, 'initial_val': 50},
-    {'name': 'sunlight_exposure', 'unit': 'lux', 'min': 0, 'max': 100000, 'initial_val': 50000},
+    {'name': 'sunlight_exposure', 'unit': 'lux', 'min': 0, 'max': 140, 'initial_val': 70},
     {'name': 'co2_concentration', 'unit': 'ppm', 'min': 300, 'max': 1000, 'initial_val': 400},
     {'name': 'organic_matter', 'unit': '%', 'min': 0, 'max': 10, 'initial_val': 3.5},
 ]
 
 # --- 2. Control Device Module ---
 class ControlDevice:
-    def __init__(self, name, action_func):
+    """
+    Represents a control device that can perform actions in the farm ecosystem.
+    """
+    def __init__(self, name: str, action_func):
         self.name = name
         self.action_func = action_func
         self.status = "idle"
         self.lock = Lock()
 
-    def perform_action(self, orchestrator_instance, *args, **kwargs):
+    def perform_action(self, orchestrator_instance: 'Orchestrator', *args, **kwargs) -> str:
+        """
+        Executes the control device's action.
+        Args:
+            orchestrator_instance (Orchestrator): The orchestrator instance managing the plot.
+            *args: Positional arguments for the action function.
+            **kwargs: Keyword arguments for the action function.
+        Returns:
+            str: A message indicating the result of the action.
+        """
         with self.lock:
             self.status = "active"
             print(f"[{self.name}] Performing action...")
@@ -95,51 +128,84 @@ class ControlDevice:
             self.status = "idle"
             return result
 
-    def get_status(self):
+    def get_status(self) -> str:
+        """
+        Retrieves the current status of the control device.
+        Returns:
+            str: The status of the device (e.g., "idle", "active").
+        """
         with self.lock:
             return self.status
 
-# Define specific actions
-def water_crop_action(orchestrator_instance, amount_ml):
+def water_crop_action(orchestrator_instance: 'Orchestrator', amount_ml: float) -> str:
+    """
+    Simulates watering the crop, increasing soil moisture.
+    Args:
+        orchestrator_instance (Orchestrator): The orchestrator managing the plot.
+        amount_ml (float): The amount of water to apply in milliliters.
+    Returns:
+        str: A message confirming the action.
+    """
     plot_id = orchestrator_instance.plot_id
     print(f"[ACTION] Plot {plot_id}: Watering crop with {amount_ml} ml of water.")
-    # Simulate increase in soil moisture
     soil_moisture_sensor = orchestrator_instance.sensor_group.get_sensor('soil_moisture')
     if soil_moisture_sensor:
         current_moisture = soil_moisture_sensor.get_value()
-        new_moisture = min(soil_moisture_sensor.max_val, current_moisture + (amount_ml / 100.0)) # Example: 100ml increases moisture by 1%
+        new_moisture = min(soil_moisture_sensor.max_val, current_moisture + (amount_ml / 100.0))
         soil_moisture_sensor.set_value(new_moisture)
         print(f"[{plot_id}] Soil moisture increased to {new_moisture:.2f}%.")
     return f"Watered {plot_id} with {amount_ml} ml"
 
-def notify_user_action(orchestrator_instance, message):
+def notify_user_action(orchestrator_instance: 'Orchestrator', message: str) -> str:
+    """
+    Sends a notification message to the user.
+    Args:
+        orchestrator_instance (Orchestrator): The orchestrator managing the plot.
+        message (str): The message to send.
+    Returns:
+        str: A message confirming the notification.
+    """
     plot_id = orchestrator_instance.plot_id
     print(f"[ACTION] Plot {plot_id}: User Notification: {message}")
     return f"Notified user for {plot_id}: {message}"
 
-def adjust_lighting_action(orchestrator_instance, intensity_percent):
+def adjust_lighting_action(orchestrator_instance: 'Orchestrator', intensity_percent: float) -> str:
+    """
+    Simulates adjusting lighting, changing sunlight exposure.
+    Args:
+        orchestrator_instance (Orchestrator): The orchestrator managing the plot.
+        intensity_percent (float): The desired lighting intensity (0-100%).
+    Returns:
+        str: A message confirming the action.
+    """
     plot_id = orchestrator_instance.plot_id
     print(f"[ACTION] Plot {plot_id}: Adjusting lighting to {intensity_percent}%.")
-    # Simulate change in sunlight exposure
     sunlight_sensor = orchestrator_instance.sensor_group.get_sensor('sunlight_exposure')
     if sunlight_sensor:
-        # Example: Map intensity_percent (0-100) to sunlight_exposure (min-max)
         new_sunlight = sunlight_sensor.min_val + (sunlight_sensor.max_val - sunlight_sensor.min_val) * (intensity_percent / 100.0)
         sunlight_sensor.set_value(new_sunlight)
         print(f"[{plot_id}] Sunlight exposure adjusted to {new_sunlight:.2f} lux.")
     return f"Adjusted lighting for {plot_id} to {intensity_percent}%"
 
-def adjust_nutrient_action(orchestrator_instance, nutrient_type, amount_mg):
+def adjust_nutrient_action(orchestrator_instance: 'Orchestrator', nutrient_type: str, amount_mg: float) -> str:
+    """
+    Simulates adjusting nutrient levels (N, P, K) in the soil.
+    Args:
+        orchestrator_instance (Orchestrator): The orchestrator managing the plot.
+        nutrient_type (str): The type of nutrient to adjust (e.g., 'NPK', 'N').
+        amount_mg (float): The amount of nutrient to add in milligrams.
+    Returns:
+        str: A message confirming the action.
+    """
     plot_id = orchestrator_instance.plot_id
     print(f"[ACTION] Plot {plot_id}: Adjusting {nutrient_type} by {amount_mg} mg.")
-    # Simulate increase in N, P, K based on nutrient_type
     if nutrient_type.upper() == 'NPK':
         n_sensor = orchestrator_instance.sensor_group.get_sensor('N')
         p_sensor = orchestrator_instance.sensor_group.get_sensor('P')
         k_sensor = orchestrator_instance.sensor_group.get_sensor('K')
         
         if n_sensor:
-            n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + (amount_mg / 10.0))) # Example
+            n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + (amount_mg / 10.0)))
         if p_sensor:
             p_sensor.set_value(min(p_sensor.max_val, p_sensor.get_value() + (amount_mg / 10.0)))
         if k_sensor:
@@ -150,27 +216,42 @@ def adjust_nutrient_action(orchestrator_instance, nutrient_type, amount_mg):
         if n_sensor:
             n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + (amount_mg / 5.0)))
         print(f"[{plot_id}] Nitrogen level adjusted.")
-    # Add more specific nutrient types if needed
     return f"Adjusted {nutrient_type} for {plot_id} by {amount_mg} mg"
 
 # --- 3. Crop Management Module ---
 class Crop:
-    def __init__(self, plot_id, crop_type, current_growth_stage="seedling"):
+    """
+    Represents a crop planted in a specific plot, tracking its type and parameters.
+    """
+    def __init__(self, plot_id: str, crop_type: str, current_growth_stage: str = "seedling"):
         self.plot_id = plot_id
         self.crop_type = crop_type
         self.current_growth_stage = current_growth_stage
-        self.parameters = {
-            'target_yield': 100, # Example parameter
-            'disease_risk': 0.1, # Example parameter
-            'pest_risk': 0.05,   # Example parameter
+        self.parameters: Dict[str, Union[int, float]] = {
+            'target_yield': 100,
+            'disease_risk': 0.1,
+            'pest_risk': 0.05,
         }
         self.lock = Lock()
 
-    def get_parameters(self):
+    def get_parameters(self) -> Dict[str, Union[int, float]]:
+        """
+        Retrieves a copy of the crop's current parameters.
+        Returns:
+            Dict[str, Union[int, float]]: A dictionary of crop parameters.
+        """
         with self.lock:
             return self.parameters.copy()
 
-    def update_parameter(self, param_name, value):
+    def update_parameter(self, param_name: str, value: Union[int, float]) -> bool:
+        """
+        Updates a specific parameter of the crop.
+        Args:
+            param_name (str): The name of the parameter to update.
+            value (Union[int, float]): The new value for the parameter.
+        Returns:
+            bool: True if the parameter was updated, False otherwise.
+        """
         with self.lock:
             if param_name in self.parameters:
                 self.parameters[param_name] = value
@@ -181,83 +262,81 @@ class Crop:
 
 # --- 4. Orchestrator Module ---
 class Orchestrator:
-    def __init__(self, plot_id, crop_type, sensor_group, plot_control_devices, update_interval=5):
+    """
+    Manages a single farm plot, integrating sensors, control devices, and the recommendation system.
+    Runs in a separate thread to continuously monitor conditions and trigger actions.
+    """
+    def __init__(self, plot_id: str, crop_type: str, sensor_group: SensorGroup, 
+                 plot_control_devices: Dict[str, 'ControlDevice'], 
+                 recommendation_system: RecommendationSystem, update_interval: int = 5):
         self.plot_id = plot_id
         self.crop = Crop(plot_id, crop_type)
         self.sensor_group = sensor_group
-        self.control_devices = plot_control_devices # Dict of ControlDevice objects
+        self.control_devices = plot_control_devices
+        self.recommendation_system = recommendation_system
         self.update_interval = update_interval
         self._running = False
         self._thread = None
         self._stop_event = Event()
-        self.data_history = deque(maxlen=100) # Store last 100 sensor readings
-        self.recommendation_history = deque(maxlen=20) # Store last 20 recommendations
+        self.data_history: deque[tuple[float, Dict[str, float]]] = deque(maxlen=100)
+        self.recommendation_history: deque[tuple[float, List[Dict[str, Any]]]] = deque(maxlen=20)
 
-    def _run_orchestration_loop(self):
-        global scaler, pca, dl_ensemble_models, rf_ensemble_models, gb_ensemble_models, \
-               feature_columns_for_prediction, target_indicators, crop_ideal_indicator_ranges, \
-               predict_indicators_ensemble_func, recommend_sensor_changes_from_indicators_func
-
-        if not all([scaler, pca, dl_ensemble_models, rf_ensemble_models, gb_ensemble_models,
-                    feature_columns_for_prediction, target_indicators, crop_ideal_indicator_ranges,
-                    predict_indicators_ensemble_func, recommend_sensor_changes_from_indicators_func]):
-            print(f"Orchestrator for Plot {self.plot_id}: Recommendation system not fully loaded. Skipping loop.")
-            return
-
+    def _run_orchestration_loop(self) -> None:
+        """
+        The main loop for the orchestrator. Reads sensor data, gets recommendations,
+        and triggers control device actions.
+        """
         while not self._stop_event.is_set():
             print(f"\n--- Orchestrator for Plot {self.plot_id} ({self.crop.crop_type}) ---")
             sensor_data = self.sensor_group.get_all_sensor_data()
             self.data_history.append((time.time(), sensor_data))
             print(f"Current Sensor Data: {sensor_data}")
 
-            # Prepare data for prediction
-            input_for_prediction = {k: sensor_data.get(k, 0) for k in feature_columns_for_prediction}
-            
-            # Predict indicators using the ensemble model
-            predicted_indicators = predict_indicators_ensemble_func(
-                input_for_prediction, scaler, pca, dl_ensemble_models, rf_ensemble_models, gb_ensemble_models,
-                feature_columns_for_prediction, target_indicators
-            )
+            predicted_indicators = self.recommendation_system.predict_indicators(sensor_data)
             print(f"Predicted Indicators: {predicted_indicators}")
 
-            # Get recommendations based on predicted indicators and crop type
-            recommendations = recommend_sensor_changes_from_indicators_func(
-                predicted_indicators, self.crop.crop_type, crop_ideal_indicator_ranges
+            # Pass current_sensor_data to the recommendation system for gradient analysis
+            recommendations = self.recommendation_system.recommend_sensor_changes_from_indicators(
+                predicted_indicators, self.crop.crop_type, sensor_data
             )
             self.recommendation_history.append((time.time(), recommendations))
             print("Recommendations:")
             for rec in recommendations:
                 print(f"- {rec}")
-                # Trigger actions based on recommendations
                 self._trigger_action_from_recommendation(rec)
 
             time.sleep(self.update_interval)
 
-    def _trigger_action_from_recommendation(self, recommendation_text):
-        # Simple rule-based action triggering for demonstration
-        if "increase conditions affecting WAI" in recommendation_text:
-            self.control_devices['water_pump'].perform_action(self, 500) # Water 500ml
-        elif "decrease conditions affecting WAI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self, "Soil moisture is too high, consider reducing irrigation.")
-        elif "increase conditions affecting NBR" in recommendation_text:
-            self.control_devices['nutrient_dispenser'].perform_action(self, 'NPK', 100)
-        elif "decrease conditions affecting NBR" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self, "Nutrient levels are too high, consider flushing or reducing fertilizer.")
-        elif "increase conditions affecting PP" in recommendation_text:
-            self.control_devices['lighting_system'].perform_action(self, 80) # Increase light to 80%
-        elif "decrease conditions affecting PP" in recommendation_text:
-            self.control_devices['lighting_system'].perform_action(self, 40) # Decrease light to 40%
-        elif "increase conditions affecting THI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self, "Temperature/Humidity Index is low, consider increasing temperature or humidity.")
-        elif "decrease conditions affecting THI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self, "Temperature/Humidity Index is high, consider decreasing temperature or humidity.")
-        elif "increase conditions affecting SFI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self, "Soil Fertility Index is low, consider adding organic matter or compost.")
-        elif "decrease conditions affecting SFI" in recommendation_text:
-            self.control_devices['notify_user'].perform_action(self, "Soil Fertility Index is high, consider soil aeration or dilution.")
+    def _trigger_action_from_recommendation(self, recommendation: Dict[str, Any]) -> None:
+        """
+        Interprets a structured recommendation and triggers the corresponding control device action.
+        Args:
+            recommendation (Dict[str, Any]): A dictionary containing the action type and parameters.
+        """
+        action_type = recommendation.get("action")
+        message = recommendation.get("message")
 
+        if action_type == "water_crop":
+            amount_ml = recommendation.get("amount_ml")
+            if amount_ml is not None and 'water_pump' in self.control_devices:
+                self.control_devices['water_pump'].perform_action(self, amount_ml)
+        elif action_type == "adjust_nutrient":
+            nutrient_type = recommendation.get("nutrient_type")
+            amount_mg = recommendation.get("amount_mg")
+            if nutrient_type and amount_mg is not None and 'nutrient_dispenser' in self.control_devices:
+                self.control_devices['nutrient_dispenser'].perform_action(self, nutrient_type, amount_mg)
+        elif action_type == "adjust_lighting":
+            intensity_percent = recommendation.get("intensity_percent")
+            if intensity_percent is not None and 'lighting_system' in self.control_devices:
+                self.control_devices['lighting_system'].perform_action(self, intensity_percent)
+        elif action_type == "notify_user":
+            if message and 'notify_user' in self.control_devices:
+                self.control_devices['notify_user'].perform_action(self, message)
+        else:
+            print(f"[{self.plot_id}] Unknown recommendation action: {recommendation}")
 
-    def start(self):
+    def start(self) -> None:
+        """Starts the orchestrator's main loop in a separate thread."""
         if not self._running:
             self._running = True
             self._stop_event.clear()
@@ -266,7 +345,8 @@ class Orchestrator:
             self._thread.start()
             print(f"Orchestrator for Plot {self.plot_id} started.")
 
-    def stop(self):
+    def stop(self) -> None:
+        """Stops the orchestrator's main loop and joins its thread."""
         if self._running:
             self._running = False
             self._stop_event.set()
@@ -276,36 +356,64 @@ class Orchestrator:
 
 # --- Main Simulation Setup ---
 class SmartFarmEcosystem:
+    """
+    Manages multiple farm plots, each with its own sensors, control devices, and orchestrator.
+    """
     def __init__(self):
-        self.sensor_groups = {} # plot_id -> SensorGroup
-        self.orchestrators = {} # plot_id -> Orchestrator
+        self.sensor_groups: Dict[str, SensorGroup] = {}
+        self.orchestrators: Dict[str, Orchestrator] = {}
         self.lock = Lock()
 
-    def add_farm_plot(self, plot_id, crop_type, plot_control_devices, sensors_config=FARM_SENSORS_CONFIG, update_interval=5):
+    def add_farm_plot(self, plot_id: str, crop_type: str, 
+                      plot_control_devices: Dict[str, ControlDevice], 
+                      recommendation_system: RecommendationSystem,
+                      sensors_config: List[Dict[str, Any]] = FARM_SENSORS_CONFIG, 
+                      update_interval: int = 5) -> Optional[Orchestrator]:
+        """
+        Adds a new farm plot to the ecosystem, creating its sensor group and orchestrator.
+        Args:
+            plot_id (str): Unique identifier for the plot.
+            crop_type (str): The type of crop planted in this plot.
+            plot_control_devices (Dict[str, ControlDevice]): Dictionary of control devices for this plot.
+            recommendation_system (RecommendationSystem): The instance of the recommendation system.
+            sensors_config (List[Dict[str, Any]]): Configuration for the sensors in this plot.
+            update_interval (int): How often the orchestrator loop runs in seconds.
+        Returns:
+            Optional[Orchestrator]: The created Orchestrator instance, or None if the plot already exists.
+        """
         with self.lock:
             if plot_id in self.orchestrators:
                 print(f"Plot {plot_id} already exists.")
-                return
+                return None
 
             sensor_group = SensorGroup(f"Plot_{plot_id}_Sensors", sensors_config)
-            orchestrator = Orchestrator(plot_id, crop_type, sensor_group, plot_control_devices, update_interval)
+            orchestrator = Orchestrator(plot_id, crop_type, sensor_group, plot_control_devices, recommendation_system, update_interval)
             
             self.sensor_groups[plot_id] = sensor_group
             self.orchestrators[plot_id] = orchestrator
             print(f"Added Farm Plot {plot_id} with {crop_type}.")
             return orchestrator
 
-    def start_all_orchestrators(self):
+    def start_all_orchestrators(self) -> None:
+        """Starts all orchestrators managed by the ecosystem."""
         with self.lock:
             for orchestrator in self.orchestrators.values():
                 orchestrator.start()
 
-    def stop_all_orchestrators(self):
+    def stop_all_orchestrators(self) -> None:
+        """Stops all orchestrators managed by the ecosystem."""
         with self.lock:
             for orchestrator in self.orchestrators.values():
                 orchestrator.stop()
 
-    def get_plot_info(self, plot_id):
+    def get_plot_info(self, plot_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves comprehensive information about a specific farm plot.
+        Args:
+            plot_id (str): The ID of the plot to retrieve information for.
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary containing plot details, or None if not found.
+        """
         with self.lock:
             orchestrator = self.orchestrators.get(plot_id)
             if orchestrator:
@@ -323,14 +431,31 @@ class SmartFarmEcosystem:
                 }
             return None
 
-    def get_sensor_for_plot(self, plot_id, sensor_name):
+    def get_sensor_for_plot(self, plot_id: str, sensor_name: str) -> Optional[Sensor]:
+        """
+        Retrieves a specific sensor from a given plot.
+        Args:
+            plot_id (str): The ID of the plot.
+            sensor_name (str): The name of the sensor to retrieve.
+        Returns:
+            Optional[Sensor]: The Sensor object if found, otherwise None.
+        """
         with self.lock:
             sensor_group = self.sensor_groups.get(plot_id)
             if sensor_group:
                 return sensor_group.get_sensor(sensor_name)
             return None
 
-    def update_crop_parameter(self, plot_id, param_name, value):
+    def update_crop_parameter(self, plot_id: str, param_name: str, value: Union[int, float]) -> bool:
+        """
+        Updates a crop parameter for a specific plot.
+        Args:
+            plot_id (str): The ID of the plot.
+            param_name (str): The name of the crop parameter to update.
+            value (Union[int, float]): The new value for the parameter.
+        Returns:
+            bool: True if the parameter was updated, False otherwise.
+        """
         with self.lock:
             orchestrator = self.orchestrators.get(plot_id)
             if orchestrator:
@@ -338,38 +463,18 @@ class SmartFarmEcosystem:
             print(f"Plot {plot_id} not found.")
             return False
 
-# --- Utility to load recommendation system components ---
-def load_recommendation_system_components(recommendation_module):
-    global scaler, pca, dl_ensemble_models, rf_ensemble_models, gb_ensemble_models, \
-           feature_columns_for_prediction, target_indicators, crop_ideal_indicator_ranges, \
-           predict_indicators_ensemble_func, recommend_sensor_changes_from_indicators_func
-
-    scaler = recommendation_module.scaler
-    pca = recommendation_module.pca
-    dl_ensemble_models = recommendation_module.dl_ensemble_models
-    rf_ensemble_models = recommendation_module.rf_ensemble_models
-    gb_ensemble_models = recommendation_module.gb_ensemble_models
-    feature_columns_for_prediction = recommendation_module.feature_columns_for_prediction
-    target_indicators = recommendation_module.target_indicators
-    crop_ideal_indicator_ranges = recommendation_module.crop_ideal_indicator_ranges
-    predict_indicators_ensemble_func = recommendation_module.predict_indicators_ensemble
-    recommend_sensor_changes_from_indicators_func = recommendation_module.recommend_sensor_changes_from_indicators
-    print("Recommendation system components loaded successfully.")
-
 # Example Usage (to be run in a separate script or interactive session)
 if __name__ == "__main__":
-    # This part would typically be in a separate main script or interactive session
-    # to avoid circular imports and manage the simulation lifecycle.
     print("This script defines the Smart Farm Ecosystem components.")
     print("To run a simulation, you would import these components and orchestrate them.")
     print("Example: ")
     print("  import smart_farm_ecosystem")
-    print("  import smart_farm_recommendation as rec_sys")
-    print("  smart_farm_ecosystem.load_recommendation_system_components(rec_sys)")
+    print("  from smart_farm_recommendation import RecommendationSystem")
+    print("  rec_system = RecommendationSystem()")
     print("  farm = smart_farm_ecosystem.SmartFarmEcosystem()")
-    print("  farm.add_farm_plot('plot1', 'rice')")
-    print("  farm.add_farm_plot('plot2', 'maize')")
-    print("  farm.start_all_orchestrators()")
+    print("  # When adding a plot, pass the recommendation_system instance")
+    print("  # farm.add_farm_plot('plot1', 'rice', plot_control_devices, rec_system)")
+    print("  # farm.start_all_orchestrators()")
     print("  # To interact, e.g., change a sensor value:")
     print("  # sensor_n_plot1 = farm.get_sensor_for_plot('plot1', 'N')")
     print("  # if sensor_n_plot1: sensor_n_plot1.set_value(120)")
