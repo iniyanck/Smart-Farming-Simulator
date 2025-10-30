@@ -41,16 +41,21 @@ class RecommendationSystem:
         self.feature_columns_for_prediction: List[str] = [] # These will be the features X was trained on
         self.target_indicators: List[str] = ['THI', 'NBR', 'WAI', 'PP', 'SFI']
         self.crop_ideal_indicator_ranges: Dict[str, Dict[str, tuple[float, float]]] = {}
-        self.optimal_sensor_combinations: Dict[str, List[Dict[str, float]]] = {} # New attribute for optimal sensor combinations
+        self.optimal_sensor_combinations: Dict[str, Dict[str, float]] = {} # New attribute for optimal sensor combinations
         self.mean_training_features: Optional[Dict[str, float]] = None # Store means of non-controllable features
         self.controllable_sensors_config = {
             'N': {'step': 5.0, 'action_type': 'adjust_nutrient', 'nutrient_type': 'N', 'action_param_name': 'amount_mg', 'scale_factor': 5.0, 'min_val': 0.0, 'max_val': 200.0},
-            'P': {'step': 5.0, 'action_type': 'adjust_nutrient', 'nutrient_type': 'P', 'action_param_name': 'amount_mg', 'scale_factor': 5.0, 'min_val': 0.0, 'max_val': 200.0},
-            'K': {'step': 5.0, 'action_type': 'adjust_nutrient', 'nutrient_type': 'K', 'action_param_name': 'amount_mg', 'scale_factor': 5.0, 'min_val': 0.0, 'max_val': 200.0},
+            'P': {'step': 5.0, 'action_type': 'adjust_nutrient', 'nutrient_type': 'P', 'action_param_name': 'amount_mg', 'scale_factor': 10.0, 'min_val': 0.0, 'max_val': 200.0},
+            'K': {'step': 5.0, 'action_type': 'adjust_nutrient', 'nutrient_type': 'K', 'action_param_name': 'amount_mg', 'scale_factor': 10.0, 'min_val': 0.0, 'max_val': 200.0},
             'soil_moisture': {'step': 5.0, 'action_type': 'water_crop', 'action_param_name': 'amount_ml', 'scale_factor': 100.0, 'min_val': 0.0, 'max_val': 100.0},
             'sunlight_exposure': {'step': 5.0, 'action_type': 'adjust_lighting', 'action_param_name': 'intensity_percent', 'scale_factor': 1.0, 'min_val': 0.0, 'max_val': 140.0},
         }
+        self.target_crop = None
         self._load_or_train_models()
+
+    def set_target_crop(self, crop_name: str):
+        """Sets the target crop for optimization."""
+        self.target_crop = crop_name
 
     def _load_or_train_models(self) -> None:
         """
@@ -330,23 +335,23 @@ class RecommendationSystem:
         joblib.dump(self.crop_ideal_indicator_ranges, os.path.join(self.model_dir, 'crop_ideal_indicator_ranges.pkl'))
         print("\nCalculated and saved Crop-Specific Ideal Indicator Ranges (Mean +/- 1 Std Dev).")
 
-    def _sample_optimal_sensor_combinations(self, df_cleaned: pd.DataFrame, num_samples_per_crop: int = 50) -> None:
+    def _sample_optimal_sensor_combinations(self, df_cleaned: pd.DataFrame) -> None:
         """
-        Identifies and stores optimal combinations of controllable sensor readings for each crop
-        by filtering existing data points that result in target indicators being within their ideal ranges.
-        This replaces the inefficient random sampling with a more direct approach using the training data.
+        For each crop, finds the 'median' sample that gives the least deviation from the ideal indicator ranges.
+        This "median sample" is defined as the sample whose controllable sensor values are the median
+        of all samples that achieve the minimum deviation score for that crop.
         Args:
             df_cleaned (pd.DataFrame): The cleaned DataFrame containing crop data and derived indicators.
-            num_samples_per_crop (int): The maximum number of optimal combinations to store for each crop.
         """
-        print(f"\nIdentifying optimal sensor combinations from training data for {len(df_cleaned['label'].unique())} crops (targeting up to {num_samples_per_crop} samples per crop)...")
-        optimal_combinations: Dict[str, List[Dict[str, float]]] = {}
+        print(f"\nIdentifying the 'median optimal' sensor combination for each of {len(df_cleaned['label'].unique())} crops...")
+        optimal_combinations: Dict[str, Dict[str, float]] = {} # Changed to store a single dict per crop
 
         controllable_sensor_names = list(self.controllable_sensors_config.keys())
+        
+        crops_to_process = [self.target_crop] if self.target_crop else df_cleaned['label'].unique()
 
-        for crop_label_str in df_cleaned['label'].unique():
+        for crop_label_str in crops_to_process:
             print(f"  Processing crop: {crop_label_str}...")
-            crop_optimal_sensors: List[Dict[str, float]] = []
             
             if crop_label_str not in self.crop_ideal_indicator_ranges:
                 print(f"    No ideal indicator ranges for {crop_label_str}. Skipping.")
@@ -355,40 +360,45 @@ class RecommendationSystem:
             ideal_ranges = self.crop_ideal_indicator_ranges[crop_label_str]
             
             # Filter data for the current crop
-            crop_data = df_cleaned[df_cleaned['label'] == crop_label_str]
+            crop_data = df_cleaned[df_cleaned['label'] == crop_label_str].copy() # Use .copy() to avoid SettingWithCopyWarning
 
-            # Iterate through each row of the crop's data
-            for _, row in crop_data.iterrows():
-                if len(crop_optimal_sensors) >= num_samples_per_crop:
-                    break # Stop if we've collected enough samples for this crop
-
-                is_optimal = True
+            # Calculate deviation for each sample in the crop data
+            deviations = []
+            for idx, row in crop_data.iterrows():
                 current_indicators = {indicator: row[indicator] for indicator in self.target_indicators}
-
-                for indicator, value in current_indicators.items():
-                    if indicator not in ideal_ranges:
-                        is_optimal = False
-                        break
-                    ideal_min, ideal_max = ideal_ranges[indicator]
-                    if not (ideal_min <= value <= ideal_max):
-                        is_optimal = False
-                        break
-                
-                if is_optimal:
-                    # Extract controllable sensor values from this optimal row
-                    controllable_sensor_values = {
-                        sensor_name: row[sensor_name] 
-                        for sensor_name in controllable_sensor_names 
-                        if sensor_name in row
-                    }
-                    crop_optimal_sensors.append(controllable_sensor_values)
+                deviation = self._evaluate_indicator_deviation(current_indicators, ideal_ranges)
+                deviations.append(deviation)
             
-            optimal_combinations[crop_label_str] = crop_optimal_sensors
-            print(f"    Found {len(crop_optimal_sensors)} optimal sensor combinations for {crop_label_str}.")
+            crop_data['deviation'] = deviations
+
+            if crop_data.empty:
+                print(f"    No data available for crop: {crop_label_str}. Skipping.")
+                continue
+
+            min_deviation = crop_data['deviation'].min()
+            
+            # Collect all samples that achieve the minimum deviation
+            least_error_samples = crop_data[crop_data['deviation'] == min_deviation]
+
+            if least_error_samples.empty:
+                print(f"    No samples with minimum deviation found for {crop_label_str}. Skipping.")
+                continue
+
+            # Calculate the median of controllable sensor values from these least error samples
+            median_optimal_sensor_values: Dict[str, float] = {}
+            for sensor_name in controllable_sensor_names:
+                if sensor_name in least_error_samples.columns:
+                    median_optimal_sensor_values[sensor_name] = least_error_samples[sensor_name].median()
+                else:
+                    # Fallback if a controllable sensor column is missing (shouldn't happen if data is consistent)
+                    median_optimal_sensor_values[sensor_name] = self.controllable_sensors_config[sensor_name]['min_val'] # Or some other default
+
+            optimal_combinations[crop_label_str] = median_optimal_sensor_values
+            print(f"    Identified median optimal sensor combination for {crop_label_str} with min deviation {min_deviation:.4f}.")
 
         self.optimal_sensor_combinations = optimal_combinations
         joblib.dump(self.optimal_sensor_combinations, os.path.join(self.model_dir, 'optimal_sensor_combinations.pkl'))
-        print("Saved optimal sensor combinations.")
+        print("Saved median optimal sensor combinations.")
 
     def predict_indicators(self, input_data: Dict[str, float], crop_label: str) -> Dict[str, float]:
         """
@@ -453,21 +463,76 @@ class RecommendationSystem:
         
         return dict(zip(self.target_indicators, ensembled_predictions))
 
-    def _calculate_indicator_gradients(self, current_sensor_data: Dict[str, float], 
-                                        predicted_indicators_dict: Dict[str, float],
-                                        crop_label: str) -> Dict[str, Dict[str, float]]:
+    def _predict_indicators_batch(self, input_df: pd.DataFrame, crop_label: str) -> pd.DataFrame:
         """
-        Calculates the approximate gradient (impact per unit change) of each controllable sensor
-        on each target indicator using perturbation.
+        Predicts target indicators for a batch of input sensor data and a crop label using the ensemble model.
         Args:
-            current_sensor_data (Dict[str, float]): The current raw sensor readings.
-            predicted_indicators_dict (Dict[str, float]): Predicted values for each target indicator.
-            crop_label (str): The type of crop being grown.
+            input_df (pd.DataFrame): A DataFrame where each row is a set of raw sensor readings.
+            crop_label (str): The type of crop for which to make predictions.
         Returns:
-            Dict[str, Dict[str, float]]: A dictionary where keys are sensor names, and values are
-                                         dictionaries of indicator impacts (gradients).
+            pd.DataFrame: Predicted values for each target indicator for each input row.
+        """
+        if not all([self.scaler, self.pca, self.dl_ensemble_models, self.rf_ensemble_models, self.gb_ensemble_models, self.feature_columns_for_prediction, self.label_encoder]):
+            raise RuntimeError("Recommendation system components not fully loaded or trained.")
+
+        # Create a DataFrame that matches the features X was trained on (self.feature_columns_for_prediction)
+        # This includes raw sensor data, other original features, and label_encoded
+        
+        # Start with a base DataFrame for the current prediction
+        predict_df = input_df.copy()
+
+        # Add label_encoded
+        if 'label_encoded' in self.feature_columns_for_prediction:
+            encoded_label = self.label_encoder.transform([crop_label])[0]
+            predict_df['label_encoded'] = encoded_label
+
+        # Add other original features that are in self.feature_columns_for_prediction but not in input_data
+        # For these, we'll use the pre-calculated mean from training data.
+        if self.mean_training_features is None:
+            raise RuntimeError("Mean training features not loaded or trained.")
+        
+        for col in self.feature_columns_for_prediction:
+            if col not in predict_df.columns:
+                if col in self.mean_training_features:
+                    predict_df[col] = self.mean_training_features[col] # Use pre-calculated mean
+                else:
+                    predict_df[col] = 0.0 # Fallback if feature not found even in stored means
+
+        # Ensure column order matches training
+        predict_df = predict_df[self.feature_columns_for_prediction]
+
+        input_scaled = self.scaler.transform(predict_df)
+        input_pca = self.pca.transform(input_scaled)
+
+        all_individual_predictions: List[np.ndarray] = []
+
+        dl_individual_predictions = [model.predict(input_pca, verbose=0) for model in self.dl_ensemble_models]
+        if dl_individual_predictions:
+            all_individual_predictions.append(np.mean(dl_individual_predictions, axis=0))
+
+        rf_scalar_predictions = [model.predict(input_pca) for model in self.rf_ensemble_models]
+        if rf_scalar_predictions:
+            all_individual_predictions.append(np.column_stack(rf_scalar_predictions))
+
+        gb_scalar_predictions = [model.predict(input_pca) for model in self.gb_ensemble_models]
+        if gb_scalar_predictions:
+            all_individual_predictions.append(np.column_stack(gb_scalar_predictions))
+        
+        ensembled_predictions = np.mean(all_individual_predictions, axis=0)
+        
+        return pd.DataFrame(ensembled_predictions, columns=self.target_indicators)
+
+    def _calculate_indicator_gradients(self, current_sensor_data: Dict[str, float],
+                                     predicted_indicators_dict: Dict[str, float],
+                                     crop_label: str) -> Dict[str, Dict[str, float]]:
+        """
+        Calculates the approximate gradient of each controllable sensor on each target indicator
+        using batch perturbation for GPU efficiency.
         """
         gradients: Dict[str, Dict[str, float]] = {sensor: {} for sensor in self.controllable_sensors_config.keys()}
+        
+        perturbation_batch = []
+        perturbation_info = []
 
         for sensor_name, config in self.controllable_sensors_config.items():
             if sensor_name not in current_sensor_data:
@@ -476,172 +541,183 @@ class RecommendationSystem:
             original_sensor_value = current_sensor_data[sensor_name]
             perturbation_step = config['step']
 
-            # Perturb upwards
+            # Upward perturbation
             perturbed_data_increase = current_sensor_data.copy()
             perturbed_data_increase[sensor_name] = min(original_sensor_value + perturbation_step, config['max_val'])
-            predicted_after_increase = self.predict_indicators(perturbed_data_increase, crop_label)
+            perturbation_batch.append(perturbed_data_increase)
+            perturbation_info.append({'sensor': sensor_name, 'direction': 'up'})
 
-            # Perturb downwards
+            # Downward perturbation
             perturbed_data_decrease = current_sensor_data.copy()
             perturbed_data_decrease[sensor_name] = max(original_sensor_value - perturbation_step, config['min_val'])
-            predicted_after_decrease = self.predict_indicators(perturbed_data_decrease, crop_label)
+            perturbation_batch.append(perturbed_data_decrease)
+            perturbation_info.append({'sensor': sensor_name, 'direction': 'down'})
+
+        if not perturbation_batch:
+            return gradients
+
+        # Create a DataFrame and predict in a single batch
+        batch_df = pd.DataFrame(perturbation_batch)
+        batch_predictions = self._predict_indicators_batch(batch_df, crop_label)
+
+        # Process batch results
+        predictions_by_sensor_direction: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for i, info in enumerate(perturbation_info):
+            sensor = info['sensor']
+            direction = info['direction']
+            if sensor not in predictions_by_sensor_direction:
+                predictions_by_sensor_direction[sensor] = {}
+            predictions_by_sensor_direction[sensor][direction] = batch_predictions.iloc[i].to_dict()
+
+        # Calculate gradients from the batch predictions
+        for sensor_name, config in self.controllable_sensors_config.items():
+            if sensor_name not in current_sensor_data:
+                continue
+
+            original_sensor_value = current_sensor_data[sensor_name]
+            perturbation_step = config['step']
+            
+            predicted_after_increase = predictions_by_sensor_direction.get(sensor_name, {}).get('up', predicted_indicators_dict)
+            predicted_after_decrease = predictions_by_sensor_direction.get(sensor_name, {}).get('down', predicted_indicators_dict)
 
             for indicator in self.target_indicators:
-                impact_increase = predicted_after_increase.get(indicator, predicted_indicators_dict.get(indicator, 0.0)) - predicted_indicators_dict.get(indicator, 0.0)
-                impact_decrease = predicted_after_decrease.get(indicator, predicted_indicators_dict.get(indicator, 0.0)) - predicted_indicators_dict.get(indicator, 0.0)
+                base_indicator_value = predicted_indicators_dict.get(indicator, 0.0)
+                impact_increase = predicted_after_increase.get(indicator, base_indicator_value) - base_indicator_value
+                impact_decrease = predicted_after_decrease.get(indicator, base_indicator_value) - base_indicator_value
                 
-                # Approximate gradient as average of forward and backward perturbation impacts
-                # Or, if only one direction is possible due to bounds, use that.
-                if original_sensor_value + perturbation_step > config['max_val'] and original_sensor_value - perturbation_step < config['min_val']:
-                    gradient = 0.0 # Cannot perturb in either direction
-                elif original_sensor_value + perturbation_step > config['max_val']:
-                    gradient = impact_decrease / (-perturbation_step) if perturbation_step != 0 else 0.0
-                elif original_sensor_value - perturbation_step < config['min_val']:
-                    gradient = impact_increase / perturbation_step if perturbation_step != 0 else 0.0
-                else:
+                can_increase = original_sensor_value + perturbation_step <= config['max_val']
+                can_decrease = original_sensor_value - perturbation_step >= config['min_val']
+
+                if can_increase and can_decrease:
                     gradient = (impact_increase - impact_decrease) / (2 * perturbation_step) if perturbation_step != 0 else 0.0
+                elif can_increase:
+                    gradient = impact_increase / perturbation_step if perturbation_step != 0 else 0.0
+                elif can_decrease:
+                    gradient = impact_decrease / (-perturbation_step) if perturbation_step != 0 else 0.0
+                else:
+                    gradient = 0.0
                 
                 gradients[sensor_name][indicator] = gradient
         return gradients
 
+    def _evaluate_indicator_deviation(self, predicted_indicators: Dict[str, float], 
+                                       ideal_ranges: Dict[str, tuple[float, float]]) -> float:
+        """
+        Calculates a total deviation score for predicted indicators from their ideal ranges.
+        Lower score is better.
+        """
+        total_deviation = 0.0
+        for indicator, predicted_value in predicted_indicators.items():
+            if indicator not in ideal_ranges:
+                # If no ideal range, consider it a perfect match for this indicator (or handle as error)
+                continue 
+            ideal_min, ideal_max = ideal_ranges[indicator]
+            
+            if predicted_value < ideal_min:
+                total_deviation += (ideal_min - predicted_value)**2
+            elif predicted_value > ideal_max:
+                total_deviation += (predicted_value - ideal_max)**2
+            # If within range, deviation is 0 for this indicator
+        return total_deviation
+
+    def find_optimal_sensors_via_backward_analysis(self, current_sensor_data: Dict[str, float], 
+                                                   crop_label: str) -> Dict[str, float]:
+        """
+        Performs a backward analysis using gradient-based optimization to find sensor values
+        that minimize the deviation from ideal indicator ranges.
+        Args:
+            current_sensor_data (Dict[str, float]): The starting sensor readings.
+            crop_label (str): The crop for which to optimize.
+        Returns:
+            Dict[str, float]: The optimized sensor data configuration.
+        """
+        ideal_ranges = self.crop_ideal_indicator_ranges.get(crop_label)
+        if not ideal_ranges:
+            return current_sensor_data # Cannot optimize without ideal ranges
+
+        # Target the midpoint of the ideal range for each indicator
+        target_indicators = {indicator: (low + high) / 2.0 for indicator, (low, high) in ideal_ranges.items()}
+
+        # Start optimization from the current sensor state
+        optimized_sensors = current_sensor_data.copy()
+        
+        # Optimization parameters
+        learning_rate = 0.01 # Smaller learning rate for stability
+        num_iterations = 50
+        
+        print("\nStarting backward analysis to find optimal sensor settings...")
+        for i in range(num_iterations):
+            # Predict indicators for the current state of optimized_sensors
+            predicted_indicators = self.predict_indicators(optimized_sensors, crop_label)
+            
+            # Calculate the error (deviation from target) for each indicator
+            errors = {ind: predicted_indicators.get(ind, 0.0) - target_indicators.get(ind, 0.0) for ind in self.target_indicators}
+            
+            # Calculate gradients of sensors on indicators at the current state
+            gradients = self._calculate_indicator_gradients(optimized_sensors, predicted_indicators, crop_label)
+            
+            # Update sensor values based on the gradients and errors
+            for sensor_name, config in self.controllable_sensors_config.items():
+                if sensor_name not in optimized_sensors:
+                    continue
+
+                # Calculate the total adjustment for the current sensor
+                total_adjustment = 0.0
+                for indicator in self.target_indicators:
+                    if indicator in errors and indicator in gradients[sensor_name]:
+                        # Move sensor value in the opposite direction of the gradient to reduce the error
+                        total_adjustment -= errors[indicator] * gradients[sensor_name][indicator]
+                
+                # Apply the adjustment with learning rate
+                new_sensor_value = optimized_sensors[sensor_name] + learning_rate * total_adjustment
+                
+                # Clamp the new value within the sensor's operational bounds
+                optimized_sensors[sensor_name] = max(config['min_val'], min(new_sensor_value, config['max_val']))
+            
+            if (i + 1) % 10 == 0:
+                print(f"  Iteration {i+1}/{num_iterations}...")
+
+        print("Backward analysis complete.")
+        return optimized_sensors
+
     def _calculate_optimal_sensor_adjustments(self, current_sensor_data: Dict[str, float], 
-                                              predicted_indicators_dict: Dict[str, float], # Keep this for fallback
+                                              target_sensor_data: Dict[str, float],
                                               crop_label: str) -> List[Dict[str, Any]]:
         """
         Calculates optimal sensor adjustments to steer current sensor readings towards
-        a sampled optimal sensor combination for the given crop.
+        a target sensor combination.
         Args:
             current_sensor_data (Dict[str, float]): The current raw sensor readings.
-            predicted_indicators_dict (Dict[str, float]): Predicted values for each target indicator (for fallback).
+            target_sensor_data (Dict[str, float]): The target sensor values to aim for.
             crop_label (str): The type of crop being grown.
         Returns:
             List[Dict[str, Any]]: A list of structured recommendations for sensor adjustments.
         """
         recommendations: List[Dict[str, Any]] = []
 
-        if crop_label not in self.optimal_sensor_combinations or not self.optimal_sensor_combinations[crop_label]:
-            recommendations.append({"action": "notify_user", "message": f"No optimal sensor combinations found for crop: {crop_label}. Falling back to indicator-based adjustments."})
-            # Fallback to the previous logic if no optimal sensor combinations are found
-            # This requires the predicted_indicators_dict, which is why it's kept as a parameter.
-            ideal_ranges = self.crop_ideal_indicator_ranges[crop_label]
-            gradients = self._calculate_indicator_gradients(current_sensor_data, predicted_indicators_dict, crop_label)
-
-            indicator_targets: Dict[str, float] = {}
-            for indicator, predicted_value in predicted_indicators_dict.items():
-                if indicator not in ideal_ranges:
-                    continue
-                ideal_min, ideal_max = ideal_ranges[indicator]
-                if predicted_value < ideal_min:
-                    indicator_targets[indicator] = ideal_min - predicted_value
-                elif predicted_value > ideal_max:
-                    indicator_targets[indicator] = ideal_max - predicted_value
-            
-            if not indicator_targets:
-                recommendations.append({"action": "notify_user", "message": "All indicators are within ideal ranges. No adjustments needed."})
-                return recommendations
-
-            sensor_adjustments: Dict[str, float] = {sensor: 0.0 for sensor in self.controllable_sensors_config.keys()}
-            learning_rate = 0.5
-
-            for sensor_name, sensor_config in self.controllable_sensors_config.items():
-                if sensor_name not in current_sensor_data:
-                    continue
-                total_adjustment_for_sensor = 0.0
-                for indicator, target_change in indicator_targets.items():
-                    gradient = gradients.get(sensor_name, {}).get(indicator, 0.0)
-                    if abs(gradient) > 1e-5:
-                        total_adjustment_for_sensor += (target_change / gradient) * abs(target_change)
-                
-                if any(abs(indicator_targets[ind]) > 0 for ind in indicator_targets):
-                    sensor_adjustments[sensor_name] = learning_rate * (total_adjustment_for_sensor / sum(abs(tc) for tc in indicator_targets.values()))
-                else:
-                    sensor_adjustments[sensor_name] = 0.0
-
-                original_sensor_value = current_sensor_data[sensor_name]
-                proposed_new_value = original_sensor_value + sensor_adjustments[sensor_name]
-                clamped_value = max(sensor_config['min_val'], min(proposed_new_value, sensor_config['max_val']))
-                sensor_adjustments[sensor_name] = clamped_value - original_sensor_value
-            
-            # Generate structured recommendations from calculated adjustments (fallback logic)
-            for sensor_name, raw_sensor_change in sensor_adjustments.items():
-                if abs(raw_sensor_change) < 0.01:
-                    continue
-                sensor_config = self.controllable_sensors_config[sensor_name]
-                action_amount = 0.0
-                action_message_suffix = ""
-                if sensor_config['action_type'] == 'water_crop':
-                    action_amount = max(0, min(1000, raw_sensor_change * sensor_config.get('scale_factor', 1.0)))
-                    action_message_suffix = f" ({round(action_amount, 2)} ml)"
-                elif sensor_config['action_type'] == 'adjust_nutrient':
-                    action_amount = max(0, min(200, raw_sensor_change * sensor_config.get('scale_factor', 1.0)))
-                    action_message_suffix = f" ({round(action_amount, 2)} mg)"
-                elif sensor_config['action_type'] == 'adjust_lighting':
-                    current_sunlight_exposure = current_sensor_data[sensor_name]
-                    target_sunlight_exposure = current_sunlight_exposure + raw_sensor_change
-                    sunlight_min = sensor_config['min_val']
-                    sunlight_max = sensor_config['max_val']
-                    target_sunlight_exposure = max(sunlight_min, min(sunlight_max, target_sunlight_exposure))
-                    intensity_percent = ((target_sunlight_exposure - sunlight_min) / (sunlight_max - sunlight_min)) * 100.0
-                    action_amount = max(0, min(100, intensity_percent))
-                    action_message_suffix = f" ({round(action_amount, 2)}%)"
-                action_dict = {
-                    "action": sensor_config['action_type'],
-                    sensor_config['action_param_name']: round(action_amount, 2)
-                }
-                if 'nutrient_type' in sensor_config:
-                    action_dict['nutrient_type'] = sensor_config['nutrient_type']
-                recommendations.append(action_dict)
-                recommendations.append({"action": "notify_user", "message": f"Recommended {sensor_config['action_type']}{action_message_suffix} for {sensor_name} (change: {raw_sensor_change:.2f})."})
-            
-            if not recommendations:
-                recommendations.append({"action": "notify_user", "message": "No significant sensor adjustments calculated (fallback)."})
+        if not target_sensor_data:
+            recommendations.append({"action": "notify_user", "message": f"No target sensor data provided for crop: {crop_label}. Cannot calculate adjustments."})
             return recommendations
 
-
-        # 1. Find the closest optimal combination
-        current_controllable_sensors = {s: current_sensor_data.get(s, 0.0) for s in self.controllable_sensors_config.keys()}
-        
-        min_distance = float('inf')
-        target_optimal_sensors: Optional[Dict[str, float]] = None
-
-        for optimal_combo in self.optimal_sensor_combinations[crop_label]:
-            distance = 0.0
-            for sensor_name in self.controllable_sensors_config.keys():
-                # Ensure sensor exists in both current data and optimal combo
-                if sensor_name in current_controllable_sensors and sensor_name in optimal_combo:
-                    distance += (current_controllable_sensors[sensor_name] - optimal_combo[sensor_name])**2
-            distance = np.sqrt(distance)
-
-            if distance < min_distance:
-                min_distance = distance
-                target_optimal_sensors = optimal_combo
-        
-        if not target_optimal_sensors:
-            recommendations.append({"action": "notify_user", "message": f"Could not determine a target optimal sensor combination for crop: {crop_label}."})
-            return recommendations
-
-        recommendations.append({"action": "notify_user", "message": f"Targeting closest optimal sensor combination (distance: {min_distance:.2f})."})
-        recommendations.append({"action": "notify_user", "message": f"Target Optimal Sensors: {target_optimal_sensors}"})
-
-        # 2. Calculate required sensor changes
+        # 1. Calculate required sensor changes
         sensor_adjustments: Dict[str, float] = {}
-        for sensor_name, target_value in target_optimal_sensors.items():
-            if sensor_name in current_sensor_data:
+        for sensor_name in self.controllable_sensors_config.keys():
+            if sensor_name in target_sensor_data and sensor_name in current_sensor_data:
                 current_value = current_sensor_data[sensor_name]
+                target_value = target_sensor_data[sensor_name]
                 raw_change = target_value - current_value
                 
-                # Apply bounds to the raw sensor adjustment
                 sensor_config = self.controllable_sensors_config[sensor_name]
                 proposed_new_value = current_value + raw_change
                 clamped_value = max(sensor_config['min_val'], min(proposed_new_value, sensor_config['max_val']))
                 
-                sensor_adjustments[sensor_name] = clamped_value - current_value # Store the actual change after clamping
+                sensor_adjustments[sensor_name] = clamped_value - current_value
             else:
-                sensor_adjustments[sensor_name] = 0.0 # Sensor not in current data, no change
+                sensor_adjustments[sensor_name] = 0.0
 
-        # 3. Generate structured recommendations from calculated adjustments
+        # 2. Generate structured recommendations from calculated adjustments
         for sensor_name, raw_sensor_change in sensor_adjustments.items():
-            if abs(raw_sensor_change) < 0.01: # Only recommend significant changes
+            if abs(raw_sensor_change) < 0.01:
                 continue
 
             sensor_config = self.controllable_sensors_config[sensor_name]
@@ -649,25 +725,22 @@ class RecommendationSystem:
             action_message_suffix = ""
 
             if sensor_config['action_type'] == 'water_crop':
-                action_amount = max(0, min(1000, raw_sensor_change * sensor_config.get('scale_factor', 1.0))) # Amount in ml
+                action_amount = max(0, min(1000, raw_sensor_change * sensor_config.get('scale_factor', 1.0)))
                 action_message_suffix = f" ({round(action_amount, 2)} ml)"
             elif sensor_config['action_type'] == 'adjust_nutrient':
-                action_amount = max(0, min(200, raw_sensor_change * sensor_config.get('scale_factor', 1.0))) # Amount in mg
+                action_amount = max(0, min(200, raw_sensor_change * sensor_config.get('scale_factor', 1.0)))
                 action_message_suffix = f" ({round(action_amount, 2)} mg)"
             elif sensor_config['action_type'] == 'adjust_lighting':
-                # Convert target sunlight_exposure to intensity_percent (0-100)
                 current_sunlight_exposure = current_sensor_data[sensor_name]
                 target_sunlight_exposure = current_sunlight_exposure + raw_sensor_change
                 
                 sunlight_min = sensor_config['min_val']
                 sunlight_max = sensor_config['max_val']
                 
-                # Cap target_sensor_value within sensor's min/max
                 target_sunlight_exposure = max(sunlight_min, min(sunlight_max, target_sunlight_exposure))
                 
-                # Convert to percentage
                 intensity_percent = ((target_sunlight_exposure - sunlight_min) / (sunlight_max - sunlight_min)) * 100.0
-                action_amount = max(0, min(100, intensity_percent)) # Cap percentage between 0-100
+                action_amount = max(0, min(100, intensity_percent))
                 action_message_suffix = f" ({round(action_amount, 2)}%)"
             
             action_dict = {
@@ -687,7 +760,7 @@ class RecommendationSystem:
     def recommend_sensor_changes_from_indicators(self, predicted_indicators_dict: Dict[str, float], crop_label: str, current_sensor_data: Dict[str, float]) -> List[Dict[str, Any]]:
         """
         Generates structured recommendations for sensor changes based on predicted indicators
-        and crop-specific ideal ranges, now primarily using sampled optimal sensor combinations.
+        and crop-specific ideal ranges, now primarily using reverse engineering to find ideal sensor values.
         Args:
             predicted_indicators_dict (Dict[str, float]): Predicted values for each target indicator (still passed for potential fallback/logging).
             crop_label (str): The type of crop being grown.
@@ -695,9 +768,39 @@ class RecommendationSystem:
         Returns:
             List[Dict[str, Any]]: A list of structured recommendations. Each dict contains 'action', 'target', 'value', etc.
         """
-        # Use the new method that targets optimal sensor combinations
+        # Step 1: Use backward analysis to find the optimal sensor settings from the current state
+        dynamically_optimized_sensors = self.find_optimal_sensors_via_backward_analysis(
+            current_sensor_data, crop_label
+        )
+
+        # Step 2: Get the pre-calculated optimal combination as a fallback/reference
+        pre_calculated_optimal_sensors = self.optimal_sensor_combinations.get(crop_label, {})
+
+        # Step 3: Evaluate which target is better
+        # Predict indicators for both dynamically optimized and pre-calculated sensor settings
+        predicted_indicators_dynamic = self.predict_indicators(dynamically_optimized_sensors, crop_label)
+        predicted_indicators_precalc = self.predict_indicators(pre_calculated_optimal_sensors, crop_label)
+        
+        ideal_ranges = self.crop_ideal_indicator_ranges.get(crop_label, {})
+        
+        deviation_dynamic = self._evaluate_indicator_deviation(predicted_indicators_dynamic, ideal_ranges)
+        deviation_precalc = self._evaluate_indicator_deviation(predicted_indicators_precalc, ideal_ranges)
+
+        print(f"\nComparing adjustment strategies for {crop_label}:")
+        print(f"  - Deviation from dynamic backward analysis: {deviation_dynamic:.4f}")
+        print(f"  - Deviation from pre-calculated optimal: {deviation_precalc:.4f}")
+
+        # Choose the sensor combination that results in a lower deviation from the ideal indicators
+        if deviation_dynamic < deviation_precalc:
+            print("  - Decision: Using dynamically calculated sensor targets.")
+            target_sensors = dynamically_optimized_sensors
+        else:
+            print("  - Decision: Using pre-calculated sensor targets as they are better or equal.")
+            target_sensors = pre_calculated_optimal_sensors
+
+        # Step 4: Calculate the adjustments needed to reach the chosen target
         intelligent_recommendations = self._calculate_optimal_sensor_adjustments(
-            current_sensor_data, predicted_indicators_dict, crop_label
+            current_sensor_data, target_sensors, crop_label
         )
         
         return intelligent_recommendations

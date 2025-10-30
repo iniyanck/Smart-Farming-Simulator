@@ -12,7 +12,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run a single Smart Farm Orchestrator.")
     parser.add_argument("--plot_id", required=True, help="ID of the farm plot.")
     parser.add_argument("--crop_type", required=True, help="Type of crop in the plot.")
-    parser.add_argument("--update_interval", type=int, default=5, help="Update interval for the orchestrator in seconds.")
+    parser.add_argument("--update_interval", type=int, default=1, help="Update interval for the orchestrator in seconds.")
     args = parser.parse_args()
 
     plot_id: str = args.plot_id
@@ -24,6 +24,7 @@ def main() -> None:
     print(f"[{plot_id}] Initializing Recommendation System...")
     try:
         recommendation_system = RecommendationSystem()
+        recommendation_system.set_target_crop(crop_type)
         print(f"[{plot_id}] Recommendation System loaded successfully.")
     except Exception as e:
         print(f"[{plot_id}] Error initializing Recommendation System: {e}")
@@ -59,27 +60,11 @@ def main() -> None:
                     break
                 elif action == 'help':
                     print(f"\n[{plot_id}] Available Commands for Orchestrator {plot_id}:")
-                    print(f"  set [sensor_name] [value] - Manually set a sensor value (e.g., 'set N 120')")
                     print(f"  crop_param [param_name] [value] - Update a crop parameter (e.g., 'crop_param target_yield 150')")
-                    print(f"  irrigate [amount_ml]    - Manually irrigate the plot (e.g., 'irrigate 500')")
-                    print(f"  fertilize [type] [amount_mg] - Manually add fertilizer (e.g., 'fertilize NPK 100')")
                     print(f"  status                  - Show current sensor data, crop parameters, and recent history")
                     print(f"  exit                    - Stop this orchestrator")
                     print(f"  help                    - Show this help message")
-                elif action == 'set':
-                    if len(command_input) < 3:
-                        print(f"[{plot_id}] Usage: set [sensor_name] [value]")
-                        continue
-                    sensor_name: str = command_input[1]
-                    try:
-                        value: float = float(command_input[2])
-                        sensor = farm_instance.get_sensor_for_plot(plot_id, sensor_name)
-                        if sensor:
-                            sensor.set_value(value)
-                        else:
-                            print(f"[{plot_id}] Sensor '{sensor_name}' not found for plot '{plot_id}'.")
-                    except ValueError:
-                        print(f"[{plot_id}] Invalid value. Please enter a number.")
+                    print(f"\n[{plot_id}] Note: Sensor adjustments are now solely driven by the Recommendation System's analysis.")
                 elif action == 'crop_param':
                     if len(command_input) < 3:
                         print(f"[{plot_id}] Usage: crop_param [param_name] [value]")
@@ -93,31 +78,6 @@ def main() -> None:
                             print(f"[{plot_id}] Failed to update crop parameter '{param_name}'.")
                     except ValueError:
                         print(f"[{plot_id}] Invalid value. Please enter a number.")
-                elif action == 'irrigate':
-                    if len(command_input) < 2:
-                        print(f"[{plot_id}] Usage: irrigate [amount_ml]")
-                        continue
-                    try:
-                        amount_ml: float = float(command_input[1])
-                        if 'water_pump' in orchestrator.control_devices:
-                            orchestrator.control_devices['water_pump'].perform_action(orchestrator, amount_ml)
-                        else:
-                            print(f"[{plot_id}] Water pump control device not available for this plot.")
-                    except ValueError:
-                        print(f"[{plot_id}] Invalid amount. Please enter a number.")
-                elif action == 'fertilize':
-                    if len(command_input) < 3:
-                        print(f"[{plot_id}] Usage: fertilize [type] [amount_mg]")
-                        continue
-                    nutrient_type: str = command_input[1]
-                    try:
-                        amount_mg: float = float(command_input[2])
-                        if 'nutrient_dispenser' in orchestrator.control_devices:
-                            orchestrator.control_devices['nutrient_dispenser'].perform_action(orchestrator, nutrient_type, amount_mg)
-                        else:
-                            print(f"[{plot_id}] Nutrient dispenser control device not available for this plot.")
-                    except ValueError:
-                        print(f"[{plot_id}] Invalid amount. Please enter a number.")
                 elif action == 'status':
                     info: Optional[Dict[str, Any]] = farm_instance.get_plot_info(plot_id)
                     if info:

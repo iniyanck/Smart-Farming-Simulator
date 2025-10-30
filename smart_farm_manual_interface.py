@@ -91,7 +91,7 @@ def main_loop():
     for plot_config in farm_plots_config:
         plot_id = plot_config["plot_id"]
         crop_type = plot_config["crop_type"]
-        orchestrator = farm_ecosystem.add_farm_plot(plot_id, crop_type, generic_control_devices, rec_system, FARM_SENSORS_CONFIG, update_interval=10)
+        orchestrator = farm_ecosystem.add_farm_plot(plot_id, crop_type, generic_control_devices, rec_system, FARM_SENSORS_CONFIG, update_interval=1)
         if orchestrator:
             orchestrators[plot_id] = orchestrator
         else:
@@ -107,9 +107,13 @@ def main_loop():
     # Initial selected plot
     selected_plot_id = farm_plots_config[0]["plot_id"]
 
-    # Scrolling variables
+    # Scrolling variables for main content
     scroll_y = 0
     content_height = 0
+
+    # Scrolling variables for sensor buttons
+    sensor_scroll_y = 0
+    sensor_content_height = 0
     
     def water_crop_manual(plot_id):
         print(f"Manual Action: Water Crop for {plot_id}")
@@ -125,7 +129,38 @@ def main_loop():
         else:
             print(f"Nutrient dispenser not available for {plot_id} or plot does not exist.")
 
-    def display_sensor_info(plot_id, current_sensors, predicted_indicators, ideal_ranges, crop_type, x_start, y_start, surface, draw_to_surface=True):
+    def set_sensor_value_manual(plot_id, sensor_name, value_change):
+        print(f"Manual Action: Adjusting {sensor_name} for {plot_id} by {value_change}")
+        sensor = farm_ecosystem.get_sensor_for_plot(plot_id, sensor_name)
+        if sensor:
+            current_val = sensor.get_value()
+            new_val = current_val + value_change
+            sensor.set_value(new_val)
+        else:
+            print(f"Sensor {sensor_name} not found for plot {plot_id}.")
+
+    optimal_sensor_data_cache = {}
+    def get_optimal_sensors_manual(plot_id, crop_type):
+        print(f"Manual Action: Get Optimal Sensors for {plot_id}")
+        if plot_id in orchestrators:
+            current_sensor_data = orchestrators[plot_id].sensor_group.get_all_sensor_data()
+            optimal_sensors = rec_system.find_optimal_sensors_via_backward_analysis(current_sensor_data, crop_type)
+            optimal_sensor_data_cache[plot_id] = optimal_sensors
+        else:
+            print(f"Plot {plot_id} not found.")
+
+    def apply_optimal_sensors_manual(plot_id):
+        print(f"Manual Action: Applying Optimal Sensors for {plot_id}")
+        if plot_id in optimal_sensor_data_cache:
+            optimal_sensors = optimal_sensor_data_cache[plot_id]
+            for sensor_name, value in optimal_sensors.items():
+                sensor = farm_ecosystem.get_sensor_for_plot(plot_id, sensor_name)
+                if sensor:
+                    sensor.set_value(value)
+        else:
+            print(f"No optimal sensor data found for {plot_id}. Please calculate them first.")
+
+    def display_sensor_info(plot_id, current_sensors, predicted_indicators, ideal_ranges, crop_type, x_start, y_start, surface, draw_to_surface=True, optimal_sensors=None):
         y_offset = y_start
         line_height = 30
         
@@ -160,24 +195,9 @@ def main_loop():
         y_offset += line_height
 
         for indicator, value in predicted_indicators.items():
-            ideal_min, ideal_max = ideal_ranges.get(indicator, (None, None))
             color = BLACK
-            status_text = ""
-            range_text = ""
-
-            if ideal_min is not None and ideal_max is not None:
-                range_text = f" (Range: {ideal_min:.2f}-{ideal_max:.2f})"
-                if value < ideal_min:
-                    color = DARK_RED
-                    status_text = " (LOW)"
-                elif value > ideal_max:
-                    color = DARK_RED
-                    status_text = " (HIGH)"
-                else:
-                    color = DARK_GREEN
-                    status_text = " (IDEAL)"
             
-            text = f"{indicator}: {value:.2f}{status_text}{range_text}"
+            text = f"{indicator}: {value:.2f}"
             text_surf, text_rect = text_objects(text, font, color)
             text_rect.topleft = (x_start + 20, y_offset)
             if draw_to_surface:
@@ -185,8 +205,23 @@ def main_loop():
             y_offset += line_height
         y_offset += 10
 
-        # Removed the separate "Ideal Ranges" section as it's now integrated into Predicted Indicators
-        return y_offset # Return the current y_offset to determine content height
+        if optimal_sensors:
+            optimal_title_surf, optimal_title_rect = text_objects("Optimal Sensor Readings (Backward Analysis):", font, BLACK)
+            optimal_title_rect.topleft = (x_start, y_offset)
+            if draw_to_surface:
+                surface.blit(optimal_title_surf, optimal_title_rect)
+            y_offset += line_height
+
+            for sensor_name, value in optimal_sensors.items():
+                text = f"{sensor_name.replace('_', ' ').title()}: {value:.2f}"
+                text_surf, text_rect = text_objects(text, font, BLUE)
+                text_rect.topleft = (x_start + 20, y_offset)
+                if draw_to_surface:
+                    surface.blit(text_surf, text_rect)
+                y_offset += line_height
+            y_offset += 10
+
+        return y_offset
 
     def draw_plot_selection_buttons(plots_config, current_selected_plot_id, x_start, y_start, button_width, button_height, padding, surface):
         plot_buttons = []
@@ -227,14 +262,25 @@ def main_loop():
                         break
             
             if event.type == pygame.MOUSEWHEEL:
-                if SCROLL_AREA_X < pygame.mouse.get_pos()[0] < SCROLL_AREA_X + SCROLL_AREA_WIDTH and \
-                   SCROLL_AREA_Y < pygame.mouse.get_pos()[1] < SCROLL_AREA_Y + SCROLL_AREA_HEIGHT:
+                mouse_x, mouse_y = pygame.mouse.get_pos()
+                # Check if mouse is over the main sensor info scroll area
+                if SCROLL_AREA_X < mouse_x < SCROLL_AREA_X + SCROLL_AREA_WIDTH and \
+                   SCROLL_AREA_Y < mouse_y < SCROLL_AREA_Y + SCROLL_AREA_HEIGHT:
                     scroll_y -= event.y * 20 # Adjust scroll speed
                     # Clamp scroll_y
                     if content_height > SCROLL_AREA_HEIGHT:
                         scroll_y = max(0, min(scroll_y, content_height - SCROLL_AREA_HEIGHT))
                     else:
                         scroll_y = 0 # No need to scroll if content fits
+                # Check if mouse is over the sensor button scroll area
+                elif SENSOR_BUTTON_AREA_X < mouse_x < SENSOR_BUTTON_AREA_X + SENSOR_BUTTON_AREA_WIDTH and \
+                     SENSOR_BUTTON_AREA_Y < mouse_y < SENSOR_BUTTON_AREA_Y + SENSOR_BUTTON_AREA_HEIGHT:
+                    sensor_scroll_y -= event.y * 20 # Adjust scroll speed
+                    # Clamp sensor_scroll_y
+                    if sensor_content_height > SENSOR_BUTTON_AREA_HEIGHT:
+                        sensor_scroll_y = max(0, min(sensor_scroll_y, sensor_content_height - SENSOR_BUTTON_AREA_HEIGHT))
+                    else:
+                        sensor_scroll_y = 0 # No need to scroll if content fits
 
         screen.fill(WHITE)
 
@@ -253,8 +299,78 @@ def main_loop():
 
         # Manual action buttons for the selected plot
         if selected_plot_id:
-            button("Water Crop", 50, plot_button_y + len(farm_plots_config) * (plot_button_height + plot_button_padding) + 20, 200, 50, GREEN, BRIGHT_GREEN, partial(water_crop_manual, selected_plot_id), screen)
-            button("Add Fertilizer", 50, plot_button_y + len(farm_plots_config) * (plot_button_height + plot_button_padding) + 90, 200, 50, BLUE, BRIGHT_BLUE, partial(add_fertilizer_manual, selected_plot_id), screen)
+            # Manual action buttons for the selected plot
+            button_start_y = plot_button_y + len(farm_plots_config) * (plot_button_height + plot_button_padding) + 20
+            button_spacing = 60
+            
+            button("Water Crop", 50, button_start_y, 200, 50, GREEN, BRIGHT_GREEN, partial(water_crop_manual, selected_plot_id), screen)
+            button("Add Fertilizer", 50, button_start_y + button_spacing, 200, 50, BLUE, BRIGHT_BLUE, partial(add_fertilizer_manual, selected_plot_id), screen)
+            
+            selected_crop_type = next((p["crop_type"] for p in farm_plots_config if p["plot_id"] == selected_plot_id), "unknown")
+            button("Get Optimal Sensors", 50, button_start_y + 2 * button_spacing, 200, 50, ORANGE, YELLOW, partial(get_optimal_sensors_manual, selected_plot_id, selected_crop_type), screen)
+
+            last_button_y = button_start_y + 2 * button_spacing
+            if selected_plot_id in optimal_sensor_data_cache:
+                button("Apply Optimal", 50, button_start_y + 3 * button_spacing, 200, 50, DARK_GREEN, BRIGHT_GREEN, partial(apply_optimal_sensors_manual, selected_plot_id), screen)
+                last_button_y += button_spacing
+
+            # Define scrollable area for sensor buttons
+            SENSOR_BUTTON_AREA_X = 20
+            SENSOR_BUTTON_AREA_Y = last_button_y + 70 # Start below the last button
+            SENSOR_BUTTON_AREA_WIDTH = 230
+            SENSOR_BUTTON_AREA_HEIGHT = SCREEN_HEIGHT - SENSOR_BUTTON_AREA_Y - 20 # Adjust height to fit remaining screen
+
+            # Create a surface for sensor buttons to be drawn on
+            sensor_button_surface = pygame.Surface((SENSOR_BUTTON_AREA_WIDTH, 1000)) # Large enough initially
+
+            sensor_button_y_offset_on_surface = 0
+            sensor_button_x_left = 0
+            sensor_button_x_right = 110
+            sensor_button_width = 100
+            sensor_button_height = 30
+            sensor_button_padding = 5
+
+            for sensor_config in FARM_SENSORS_CONFIG:
+                sensor_name = sensor_config['name']
+                min_val = sensor_config['min']
+                max_val = sensor_config['max']
+                
+                # Determine a reasonable step for adjustment based on range
+                step = (max_val - min_val) / 10.0
+                if step == 0: # Handle cases where min_val == max_val (e.g., for rainfall if it's just a trigger)
+                    step = 1.0 
+                step = round(step, 2) # Keep steps reasonable
+
+                display_name = sensor_name.replace('_', ' ').title()
+                if len(display_name) > 8: # Shorten long names for buttons
+                    display_name = "".join([word[0] for word in display_name.split()]) # Use initials
+                    if len(display_name) > 4: # If initials are still too long, truncate
+                        display_name = display_name[:4]
+
+                # Increase button
+                button(f"{display_name} +", sensor_button_x_right, sensor_button_y_offset_on_surface, sensor_button_width, sensor_button_height, ORANGE, YELLOW, partial(set_sensor_value_manual, selected_plot_id, sensor_name, step), sensor_button_surface)
+                # Decrease button
+                button(f"{display_name} -", sensor_button_x_left, sensor_button_y_offset_on_surface, sensor_button_width, sensor_button_height, RED, BRIGHT_RED, partial(set_sensor_value_manual, selected_plot_id, sensor_name, -step), sensor_button_surface)
+                
+                sensor_button_y_offset_on_surface += sensor_button_height + sensor_button_padding
+            
+            sensor_content_height = sensor_button_y_offset_on_surface # Total height of all sensor buttons
+
+            # Re-clamp sensor_scroll_y after sensor_content_height is determined
+            if sensor_content_height > SENSOR_BUTTON_AREA_HEIGHT:
+                sensor_scroll_y = max(0, min(sensor_scroll_y, sensor_content_height - SENSOR_BUTTON_AREA_HEIGHT))
+            else:
+                sensor_scroll_y = 0
+
+            # Blit the sensor button surface onto the main screen within its scrollable area
+            screen.blit(sensor_button_surface, (SENSOR_BUTTON_AREA_X, SENSOR_BUTTON_AREA_Y), (0, sensor_scroll_y, SENSOR_BUTTON_AREA_WIDTH, SENSOR_BUTTON_AREA_HEIGHT))
+
+            # Draw scrollbar for sensor buttons
+            if sensor_content_height > SENSOR_BUTTON_AREA_HEIGHT:
+                scrollbar_height = SENSOR_BUTTON_AREA_HEIGHT * (SENSOR_BUTTON_AREA_HEIGHT / sensor_content_height)
+                scrollbar_y = SENSOR_BUTTON_AREA_Y + (sensor_scroll_y / sensor_content_height) * SENSOR_BUTTON_AREA_HEIGHT
+                pygame.draw.rect(screen, LIGHT_GREY, (SENSOR_BUTTON_AREA_X + SENSOR_BUTTON_AREA_WIDTH + 5, SENSOR_BUTTON_AREA_Y, 10, SENSOR_BUTTON_AREA_HEIGHT), 0) # Scrollbar background
+                pygame.draw.rect(screen, DARK_GREEN, (SENSOR_BUTTON_AREA_X + SENSOR_BUTTON_AREA_WIDTH + 5, scrollbar_y, 10, scrollbar_height), 0) # Scrollbar thumb
 
             # Fetch current sensor data for the selected plot
             selected_orchestrator = orchestrators.get(selected_plot_id)
@@ -273,14 +389,14 @@ def main_loop():
                 # First pass: Calculate content height without drawing
                 # Create a dummy surface for height calculation
                 dummy_surface = pygame.Surface((SCROLL_AREA_WIDTH, 10000)) # Large enough to not clip
-                content_height = display_sensor_info(selected_plot_id, current_sensor_data, predicted_indicators, ideal_ranges, selected_crop_type, 0, 0, dummy_surface, draw_to_surface=False)
+                content_height = display_sensor_info(selected_plot_id, current_sensor_data, predicted_indicators, ideal_ranges, selected_crop_type, 0, 0, dummy_surface, draw_to_surface=False, optimal_sensors=optimal_sensor_data_cache.get(selected_plot_id))
 
                 # Create the actual content surface with the determined height
                 content_surface = pygame.Surface((SCROLL_AREA_WIDTH, max(SCROLL_AREA_HEIGHT, content_height)))
                 content_surface.fill(WHITE) # Fill with background color
 
                 # Second pass: Draw the actual content onto the content_surface
-                display_sensor_info(selected_plot_id, current_sensor_data, predicted_indicators, ideal_ranges, selected_crop_type, 0, 0, content_surface, draw_to_surface=True)
+                display_sensor_info(selected_plot_id, current_sensor_data, predicted_indicators, ideal_ranges, selected_crop_type, 0, 0, content_surface, draw_to_surface=True, optimal_sensors=optimal_sensor_data_cache.get(selected_plot_id))
 
                 # Re-clamp scroll_y after content_height is determined
                 if content_height > SCROLL_AREA_HEIGHT:

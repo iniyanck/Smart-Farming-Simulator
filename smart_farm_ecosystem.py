@@ -6,7 +6,8 @@ from threading import Thread, Event, Lock
 from collections import deque
 from typing import Dict, List, Any, Optional, Union
 
-from smart_farm_recommendation import RecommendationSystem # Import the new class
+from smart_farm_recommendation import RecommendationSystem
+from smart_farm_logs import farm_logger
 
 # --- 1. Sensor Simulation Module ---
 class Sensor:
@@ -23,11 +24,17 @@ class Sensor:
         self.drift_rate = drift_rate
         self.noise_level = noise_level
         self.lock = Lock()
+        self.drying_rate = 0.5 if self.name == 'soil_moisture' else 0.0 # Specific drying rate for soil moisture
+        self._manual_override = False
 
     def _simulate_drift(self) -> None:
-        """Applies a random drift to the sensor's current value."""
+        """Applies a random drift to the sensor's current value and simulates drying for soil moisture."""
         drift = random.uniform(-self.drift_rate, self.drift_rate)
         self._current_val += drift
+        
+        if self.name == 'soil_moisture':
+            self._current_val -= self.drying_rate # Simulate water drying up
+            
         self._current_val = max(self.min_val, min(self.max_val, self._current_val))
 
     def _add_noise(self) -> None:
@@ -43,6 +50,9 @@ class Sensor:
             float: The current (simulated) value of the sensor.
         """
         with self.lock:
+            if self._manual_override:
+                self._manual_override = False
+                return round(self._current_val, 2)
             self._simulate_drift()
             self._add_noise()
             return round(self._current_val, 2)
@@ -55,7 +65,8 @@ class Sensor:
         """
         with self.lock:
             self._current_val = max(self.min_val, min(self.max_val, new_val))
-            print(f"Manual override: {self.name} set to {self._current_val:.2f} {self.unit}")
+            self._manual_override = True
+            farm_logger.info(f"Manual override: {self.name} set to {self._current_val:.2f} {self.unit}")
 
 class SensorGroup:
     """
@@ -123,7 +134,7 @@ class ControlDevice:
         """
         with self.lock:
             self.status = "active"
-            print(f"[{self.name}] Performing action...")
+            farm_logger.info(f"[{self.name}] Performing action...")
             result = self.action_func(orchestrator_instance, *args, **kwargs)
             self.status = "idle"
             return result
@@ -287,22 +298,22 @@ class Orchestrator:
         and triggers control device actions.
         """
         while not self._stop_event.is_set():
-            print(f"\n--- Orchestrator for Plot {self.plot_id} ({self.crop.crop_type}) ---")
+            farm_logger.info(f"--- Orchestrator for Plot {self.plot_id} ({self.crop.crop_type}) ---")
             sensor_data = self.sensor_group.get_all_sensor_data()
             self.data_history.append((time.time(), sensor_data))
-            print(f"Current Sensor Data: {sensor_data}")
+            farm_logger.info(f"Current Sensor Data: {sensor_data}")
 
             predicted_indicators = self.recommendation_system.predict_indicators(sensor_data, self.crop.crop_type)
-            print(f"Predicted Indicators: {predicted_indicators}")
+            farm_logger.info(f"Predicted Indicators: {predicted_indicators}")
 
             # Pass current_sensor_data to the recommendation system for gradient analysis
             recommendations = self.recommendation_system.recommend_sensor_changes_from_indicators(
                 predicted_indicators, self.crop.crop_type, sensor_data
             )
             self.recommendation_history.append((time.time(), recommendations))
-            print("Recommendations:")
+            farm_logger.info("Recommendations:")
             for rec in recommendations:
-                print(f"- {rec}")
+                farm_logger.info(f"- {rec}")
                 self._trigger_action_from_recommendation(rec)
 
             time.sleep(self.update_interval)
