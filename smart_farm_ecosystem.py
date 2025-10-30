@@ -15,7 +15,7 @@ class Sensor:
     Simulates a single sensor with drift and noise.
     """
     def __init__(self, name: str, unit: str, min_val: float, max_val: float, 
-                 current_val: Optional[float] = None, drift_rate: float = 0.1, noise_level: float = 0.5):
+                 current_val: Optional[float] = None, drift_rate: float = 0.01, noise_level: float = 0.02):
         self.name = name
         self.unit = unit
         self.min_val = min_val
@@ -162,7 +162,7 @@ def water_crop_action(orchestrator_instance: 'Orchestrator', amount_ml: float) -
     soil_moisture_sensor = orchestrator_instance.sensor_group.get_sensor('soil_moisture')
     if soil_moisture_sensor:
         current_moisture = soil_moisture_sensor.get_value()
-        new_moisture = min(soil_moisture_sensor.max_val, current_moisture + (amount_ml / 100.0))
+        new_moisture = min(soil_moisture_sensor.max_val, current_moisture + (amount_ml / 25.0))
         soil_moisture_sensor.set_value(new_moisture)
         print(f"[{plot_id}] Soil moisture increased to {new_moisture:.2f}%.")
     return f"Watered {plot_id} with {amount_ml} ml"
@@ -216,16 +216,16 @@ def adjust_nutrient_action(orchestrator_instance: 'Orchestrator', nutrient_type:
         k_sensor = orchestrator_instance.sensor_group.get_sensor('K')
         
         if n_sensor:
-            n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + (amount_mg / 10.0)))
+            n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + (amount_mg / 2.0)))
         if p_sensor:
-            p_sensor.set_value(min(p_sensor.max_val, p_sensor.get_value() + (amount_mg / 10.0)))
+            p_sensor.set_value(min(p_sensor.max_val, p_sensor.get_value() + (amount_mg / 2.0)))
         if k_sensor:
-            k_sensor.set_value(min(k_sensor.max_val, k_sensor.get_value() + (amount_mg / 10.0)))
+            k_sensor.set_value(min(k_sensor.max_val, k_sensor.get_value() + (amount_mg / 2.0)))
         print(f"[{plot_id}] NPK levels adjusted.")
     elif nutrient_type.upper() == 'N':
         n_sensor = orchestrator_instance.sensor_group.get_sensor('N')
         if n_sensor:
-            n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + (amount_mg / 5.0)))
+            n_sensor.set_value(min(n_sensor.max_val, n_sensor.get_value() + amount_mg))
         print(f"[{plot_id}] Nitrogen level adjusted.")
     return f"Adjusted {nutrient_type} for {plot_id} by {amount_mg} mg"
 
