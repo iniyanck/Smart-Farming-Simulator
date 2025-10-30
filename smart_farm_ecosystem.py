@@ -292,7 +292,7 @@ class Orchestrator:
             self.data_history.append((time.time(), sensor_data))
             print(f"Current Sensor Data: {sensor_data}")
 
-            predicted_indicators = self.recommendation_system.predict_indicators(sensor_data)
+            predicted_indicators = self.recommendation_system.predict_indicators(sensor_data, self.crop.crop_type)
             print(f"Predicted Indicators: {predicted_indicators}")
 
             # Pass current_sensor_data to the recommendation system for gradient analysis
